@@ -1,0 +1,6 @@
+# Snappier reruns (Streamlit 1.27+). Restart the server after changing this file.
+[runner]
+fastReruns = true
+
+[browser]
+gatherUsageStats = false

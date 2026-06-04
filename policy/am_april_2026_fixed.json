@@ -1,0 +1,151 @@
+{
+  "_comment": "Pinned AM April 2026 monthly compensation. Joy is the AM manager (excluded from rep commission summary; gets manager incentive on team payment). Vivin left the org (deals still count toward team total per policy, but he gets no payout). Joy's payment received includes the $17,500 Washington Post — Dropbox & PS server-split exception. Manager commission is reduced by the $78 carry-forward balance from Q1 2026 (Wipro slab adjustment).",
+  "period_type": "monthly",
+  "year": 2026,
+  "month": 4,
+  "month_label": "April 2026",
+  "team_target_usd": 90000,
+  "team_achievement_usd": 56237.32,
+  "monthly_tiers": {
+    "min_achievement_pct_for_commission": 60,
+    "individual_tiers": [
+      {
+        "min_pct": 0,
+        "max_pct": 60,
+        "commission_pct": 0
+      },
+      {
+        "min_pct": 60,
+        "max_pct": 75,
+        "commission_pct": 2
+      },
+      {
+        "min_pct": 76,
+        "max_pct": 99,
+        "commission_pct": 3
+      },
+      {
+        "min_pct": 100,
+        "max_pct": 125,
+        "commission_pct": 5
+      },
+      {
+        "min_pct": 126,
+        "max_pct": 150,
+        "commission_pct": 6
+      },
+      {
+        "min_pct": 151,
+        "max_pct": null,
+        "commission_pct": 8
+      }
+    ],
+    "manager_tiers": [
+      {
+        "min_pct": 60,
+        "max_pct": 80,
+        "commission_pct": 2
+      },
+      {
+        "min_pct": 81,
+        "max_pct": 99,
+        "commission_pct": 3
+      },
+      {
+        "min_pct": 100,
+        "max_pct": null,
+        "commission_pct": 4
+      }
+    ],
+    "manager_team_minimum_pct": 60,
+    "manage_deal_pct_am_only": 5
+  },
+  "reps": [
+    {
+      "name": "Joy",
+      "target_usd": 30000,
+      "achievement_usd": 13632.32,
+      "payment_received_usd": 13632.32,
+      "is_manager": true,
+      "exception": {
+        "deal_name": "Washington Post — Dropbox and PS",
+        "deal_amount_usd": 31410.6,
+        "joy_share_usd": 17500,
+        "note": "Server split exception: of the $31,410.60 Washington Post Dropbox + PS deal, $17,500 is attributed to Joy. Added to her April payment received (was $13,632.32 + $17,500 = $31,132.32)."
+      }
+    },
+    {
+      "name": "Vivin",
+      "target_usd": 30000,
+      "achievement_usd": 25726.0,
+      "payment_received_usd": 25726.0,
+      "left_org": true
+    },
+    {
+      "name": "Arundhati Sen",
+      "target_usd": 30000,
+      "achievement_usd": 16879.0,
+      "payment_received_usd": 16879.0
+    }
+  ],
+  "commission": {
+    "exchange_rate_inr_per_usd": 86,
+    "eligibility_min_pct": 60,
+    "eligibility_text": "Monthly plan: a minimum of 60% achievement of the individual quota is required for commission. Below 60% → 0% slab. Managed-deal incentive: 5% on managed deals (AM team only).",
+    "reps": []
+  },
+  "manager_incentive": {
+    "manager_name": "Joy",
+    "team_label": "Account Management",
+    "team_target_usd": 90000,
+    "team_achievement_usd": 73737.32,
+    "team_achievement_pct": 82,
+    "team_payment_received_usd": 73737.32,
+    "commission_rate_pct": 3,
+    "commission_basis": "team_payment_received",
+    "commission_basis_label": "Payment received",
+    "manager_q1_amount_usd": 2212.12,
+    "exception_note": "Joy's April income includes the $17,500 Washington Post — Dropbox & PS server-split exception (allocated to her from the $31,410.60 deal per the attached SOW).",
+    "pending_commissions": [
+      {
+        "deal_name": "NerdsToGo — New Deal — DropBox to MS (Carolina Contracting)",
+        "period": "Q1 FY2026",
+        "deal_amount_usd": 2300.0,
+        "rate_pct": 1.5,
+        "commission_usd": 34.5,
+        "note": "Q1 FY2026 deal paid in April — commission at Q1 rate (1.5%)."
+      },
+      {
+        "deal_name": "Church & Dwight Co., Inc. — Existing MSP Client — Slack to Teams",
+        "period": "Q1 FY2026",
+        "deal_amount_usd": 14614.6,
+        "rate_pct": 1.5,
+        "commission_usd": 219.22,
+        "note": "Q1 FY2026 deal paid in April — commission at Q1 rate (1.5%)."
+      },
+      {
+        "deal_name": "Artnet — New Deal — MS to Google",
+        "period": "Q1 FY2026",
+        "deal_amount_usd": 11566.4,
+        "rate_pct": 1.5,
+        "commission_usd": 173.5,
+        "note": "Q1 FY2026 deal paid in April — commission at Q1 rate (1.5%)."
+      }
+    ],
+    "total_pending_commission_usd": 427.22,
+    "pending_commission_note": "Three Q1 FY2026 deals whose payment was received in April. Commission is calculated at the Q1 rate (1.5%) and paid in this cycle.",
+    "clawbacks": [
+      {
+        "label": "Q1 2026 carry-forward (Wipro slab adjustment)",
+        "period": "Q1 2026",
+        "deal_amount_usd": 0,
+        "rate_pct": 0,
+        "deduction_usd": 78,
+        "note": "Carry-forward balance from Q1 2026 (Wipro Q4 deal cancellation slab adjustment of −$78). Deducted from this month's manager payout."
+      }
+    ],
+    "total_clawback_usd": 78,
+    "final_payout_usd": 2561.34,
+    "calculation_note": "Joy April manager commission: $73,737 (HubSpot $56,237 + Washington Post exception $17,500) × 3% (81-99% manager tier) = $2,212.12. Plus Q1 FY2026 pending deals (NerdsToGo, Church & Dwight, Artnet — total $28,481 × 1.5%) = +$427.22. Minus Q1 2026 Wipro carry-forward $78 = $2,561.34."
+  }
+}

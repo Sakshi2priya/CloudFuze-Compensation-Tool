@@ -1,0 +1,110 @@
+{
+  "policy_name": "Q1 2026 Sales Commission & Incentive Policy",
+  "source_note": "SMB reps Group A/B: individual quota achievement. Chitradip (SMB manager): team revenue vs team goal only — see manager_chitradip_team_tiers. Account Management: individual quotas by name (Joy/Vivin/Arundhati), Team vs Joy commission tiers — see account_management_quota_achievement. Enterprise (Anthony): Q1 2026 achievement tiers vs hubspot_quota_usd — see enterprise_quota_achievement.",
+  "team_quarterly_targets_usd": {
+    "SMB": 850000,
+    "Account Management": 250000,
+    "Enterprise": 1000000
+  },
+  "team_achievement_commission_thresholds_pct": [
+    [100.0, 3.0],
+    [75.0, 2.0],
+    [50.0, 1.0]
+  ],
+  "rep_slab_rows": [
+    [0, 29999.99, 0.0],
+    [30000.0, 74999.99, 1.0],
+    [75000.0, 99999.99, 2.0],
+    [100000.0, null, 4.0]
+  ],
+  "min_individual_quota_achievement_pct": 50.0,
+  "smb_quota_achievement": {
+    "enabled": true,
+    "quarterly_team_target_usd": 850000,
+    "individual_quotas_usd": {
+      "SMB_A": 150000,
+      "SMB_B": 100000
+    },
+    "min_achievement_pct_for_commission": 50,
+    "achievement_tiers": [
+      {
+        "min_pct": 50,
+        "max_pct": 75,
+        "group_a_pct": 1.5,
+        "group_b_pct": 1.0
+      },
+      {
+        "min_pct": 76,
+        "max_pct": 100,
+        "group_a_pct": 2.5,
+        "group_b_pct": 2.0
+      },
+      {
+        "min_pct": 101,
+        "max_pct": 125,
+        "group_a_pct": 4.5,
+        "group_b_pct": 4.0
+      },
+      {
+        "min_pct": 126,
+        "max_pct": null,
+        "group_a_pct": 5.5,
+        "group_b_pct": 5.0
+      }
+    ],
+    "manager_chitradip_team_tiers": [
+      { "min_pct": 50, "max_pct": 75, "commission_pct": 1.5 },
+      { "min_pct": 76, "max_pct": 100, "commission_pct": 2.5 },
+      { "min_pct": 101, "max_pct": 125, "commission_pct": 3.5 },
+      { "min_pct": 126, "max_pct": null, "commission_pct": 5.0 }
+    ]
+  },
+  "smb_use_quota_snapshot": true,
+  "account_management_quota_achievement": {
+    "enabled": true,
+    "quarterly_team_target_usd": 250000,
+    "min_achievement_pct_for_commission": 50,
+    "individual_quotas": [
+      { "quota_usd": 100000, "name_tokens": ["joy"] },
+      { "quota_usd": 100000, "name_tokens": ["vivin"] },
+      { "quota_usd": 50000, "name_tokens": ["arundhati"] }
+    ],
+    "achievement_tiers": [
+      { "min_pct": 50, "max_pct": 75, "team_pct": 1.0, "joy_pct": 1.5 },
+      { "min_pct": 76, "max_pct": 100, "team_pct": 2.0, "joy_pct": 2.5 },
+      { "min_pct": 101, "max_pct": 125, "team_pct": 4.0, "joy_pct": 3.5 },
+      { "min_pct": 126, "max_pct": null, "team_pct": 5.0, "joy_pct": 5.0 }
+    ]
+  },
+  "enterprise_quota_achievement": {
+    "enabled": true,
+    "reps": [
+      {
+        "name_tokens": ["anthony"],
+        "min_achievement_pct_for_commission": 0,
+        "achievement_tiers": [
+          { "min_pct": 0, "max_pct": 75.99, "commission_pct": 7 },
+          { "min_pct": 76, "max_pct": 100, "commission_pct": 9 },
+          { "min_pct": 101, "max_pct": 125, "commission_pct": 11 },
+          { "min_pct": 126, "max_pct": null, "commission_pct": 13 }
+        ]
+      }
+    ]
+  },
+  "outbound_meeting_payout_tiers": {
+    "title": "Outbound Meetings Payout",
+    "rows": [
+      { "meetings": "0 – 5 meetings", "payout": "No payout" },
+      { "meetings": "6 – 10 meetings", "payout": "₹3,000 per meeting" },
+      { "meetings": "11 – 15 meetings", "payout": "₹5,000 per meeting" }
+    ],
+    "note": "e.g. 8 meetings → 8 × ₹3,000 when in the 6–10 band"
+  },
+  "enterprise_anthony_performance_vs_goal": {
+    "enabled": true,
+    "target_usd": 1000000,
+    "achieved_usd": 444257.7,
+    "subtitle": "Individual target · Q1 2026"
+  },
+  "individual_quota_overrides": []
+}

@@ -1,0 +1,143 @@
+{
+  "_comment": "Pinned SMB Q1 2026 numbers. When year=2026 & quarter=1 is selected on the SMB page, the tool reads ONLY from this file (HubSpot fetch and database aggregation are bypassed). Edit this file to update displayed values. The Performance vs goal section uses 'reps[].achievement_usd' (booked totals). The Commission summary section uses 'commission.reps[]' which has paid amounts and pre-calculated payout values.",
+  "year": 2026,
+  "quarter": 1,
+  "team_target_usd": 850000,
+  "team_achievement_usd": 427934,
+  "reps": [
+    { "name": "Deepak R J",      "target_usd": 100000, "achievement_usd": 20822.00,  "payment_received_usd": 20822 },
+    { "name": "Kartik Kashyap",  "target_usd": 100000, "achievement_usd": 5175.00,   "payment_received_usd": 5175 },
+    { "name": "Kritika Gupta",   "target_usd": 100000, "achievement_usd": 96213.40,  "payment_received_usd": 96213 },
+    { "name": "Lawrence Lewis",  "target_usd": 150000, "achievement_usd": 73235.50,  "payment_received_usd": 52529 },
+    { "name": "Royston Aden",    "target_usd": 150000, "achievement_usd": 7899.00,   "payment_received_usd": 5399 },
+    { "name": "Vicky Cariappa",  "target_usd": 150000, "achievement_usd": 151025.85, "payment_received_usd": 147764 },
+    { "name": "Yogi",            "target_usd": 100000, "achievement_usd": 73563.00,  "payment_received_usd": 26695 }
+  ],
+
+  "commission": {
+    "team_deduction_pct": 10,
+    "team_deduction_reason": "No Manage deal closed by team — 10% deduction applied to achieved commission for all SMB reps",
+    "manage_deal_incentive_per_deal_usd": 500,
+    "exchange_rate_inr_per_usd": 86,
+    "eligibility_min_pct": 50,
+    "eligibility_text": "A minimum of 50% achievement of the individual quota is mandatory to qualify for commission payout.",
+    "reps": [
+      {
+        "name": "Deepak R J",
+        "group": "SMB_B",
+        "quota_usd": 100000,
+        "revenue_achieved_usd": 20822.00,
+        "eligible_pct": 21,
+        "base_commission_usd": 0,
+        "manage_deal_usd": 0,
+        "total_payout_usd": 0,
+        "note": "Below 50% achievement — not eligible"
+      },
+      {
+        "name": "Kartik Kashyap",
+        "group": "SMB_B",
+        "quota_usd": 100000,
+        "revenue_achieved_usd": 5175.00,
+        "eligible_pct": 5,
+        "base_commission_usd": 0,
+        "manage_deal_usd": 0,
+        "total_payout_usd": 0,
+        "note": "Below 50% achievement — not eligible"
+      },
+      {
+        "name": "Kritika Gupta",
+        "group": "SMB_B",
+        "quota_usd": 100000,
+        "revenue_achieved_usd": 96213.00,
+        "eligible_pct": 96,
+        "base_commission_usd": 1924,
+        "manage_deal_usd": 0,
+        "total_payout_usd": 1732,
+        "note": "No manage deal closed"
+      },
+      {
+        "name": "Lawrence Lewis",
+        "group": "SMB_A",
+        "quota_usd": 150000,
+        "revenue_achieved_usd": 73235.50,
+        "eligible_pct": 49,
+        "base_commission_usd": 0,
+        "manage_deal_usd": 1000,
+        "manage_deal_paid_now_usd": 500,
+        "total_payout_usd": 500,
+        "note": "Closed 2 manage deals (2 × $500 = $1,000 total). $500 paid this cycle; $500 pending next cycle — payment for the second deal not received at the duration of payout."
+      },
+      {
+        "name": "Royston Aden",
+        "group": "SMB_A",
+        "quota_usd": 150000,
+        "revenue_achieved_usd": 7899.00,
+        "eligible_pct": 5,
+        "base_commission_usd": 0,
+        "manage_deal_usd": 0,
+        "total_payout_usd": 0,
+        "note": "Below 50% achievement — not eligible"
+      },
+      {
+        "name": "Vicky Cariappa",
+        "group": "SMB_A",
+        "quota_usd": 150000,
+        "revenue_achieved_usd": 147764,
+        "eligible_pct": 101,
+        "base_commission_usd": 6649,
+        "manage_deal_usd": 0,
+        "total_payout_usd": 5582,
+        "note": "Includes −$402 Noventiq refund (Q3 rate 3% on $13,410)"
+      },
+      {
+        "name": "Yogi",
+        "group": "SMB_B",
+        "quota_usd": 100000,
+        "revenue_achieved_usd": 26695,
+        "eligible_pct": 72,
+        "base_commission_usd": 267,
+        "manage_deal_usd": 0,
+        "total_payout_usd": 345,
+        "note": "Includes +$105 Soules Food Q4 commission (Q4 rate 2% on $5,244)"
+      }
+    ]
+  },
+
+  "manager_incentive": {
+    "manager_name": "Chitradip",
+    "team_label": "SMB",
+    "team_target_usd": 850000,
+    "team_achievement_usd": 427934,
+    "team_achievement_pct": 50,
+    "team_payment_received_usd": 354597,
+    "commission_rate_pct": 1.5,
+    "commission_basis": "team_payment_received",
+    "commission_basis_label": "Team payment received",
+    "manager_q1_amount_usd": 5319,
+    "clawbacks": [
+      {
+        "label": "Q4 clawback — Royston · Synergy Employment",
+        "deal_amount_usd": 4395.35,
+        "rate_pct": 1.0,
+        "deduction_usd": 44,
+        "note": "$4,395.35 counted but not received | Chit 1% slab"
+      },
+      {
+        "label": "Q4 clawback — Yogi · CEG Solutions ($15,009) & Yieldstreet ($17,068)",
+        "deal_amount_usd": 32077,
+        "rate_pct": 1.0,
+        "deduction_usd": 321,
+        "note": "Chit 1% slab"
+      },
+      {
+        "label": "Noventiq Q3 deduction",
+        "deal_amount_usd": 13410,
+        "rate_pct": 1.5,
+        "deduction_usd": 201,
+        "note": "1.5% on $13,410"
+      }
+    ],
+    "total_clawback_usd": 566,
+    "final_payout_usd": 4753
+  }
+}

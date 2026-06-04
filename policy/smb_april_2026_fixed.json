@@ -1,0 +1,143 @@
+{
+  "_comment": "Pinned SMB April 2026 monthly compensation. Source: Sales Commission Policy 2026 — Monthly Plan deck. Achievements default to 0 — fill them in (or wire HubSpot fetch) to see commissions compute. The monthly_tiers block drives the Slab % column and eligibility.",
+  "period_type": "monthly",
+  "year": 2026,
+  "month": 4,
+  "month_label": "April 2026",
+  "team_target_usd": 215000,
+  "team_achievement_usd": 89809.64,
+  "monthly_tiers": {
+    "min_achievement_pct_for_commission": 60,
+    "individual_tiers": [
+      {
+        "min_pct": 0,
+        "max_pct": 60,
+        "commission_pct": 0
+      },
+      {
+        "min_pct": 60,
+        "max_pct": 75,
+        "commission_pct": 2
+      },
+      {
+        "min_pct": 76,
+        "max_pct": 99,
+        "commission_pct": 3
+      },
+      {
+        "min_pct": 100,
+        "max_pct": 125,
+        "commission_pct": 5
+      },
+      {
+        "min_pct": 126,
+        "max_pct": 150,
+        "commission_pct": 6
+      },
+      {
+        "min_pct": 151,
+        "max_pct": null,
+        "commission_pct": 8
+      }
+    ],
+    "manager_tiers": [
+      {
+        "min_pct": 60,
+        "max_pct": 80,
+        "commission_pct": 2
+      },
+      {
+        "min_pct": 81,
+        "max_pct": 99,
+        "commission_pct": 3
+      },
+      {
+        "min_pct": 100,
+        "max_pct": null,
+        "commission_pct": 4
+      }
+    ],
+    "manager_team_minimum_pct": 60,
+    "manage_deal_pct_am_only": 5
+  },
+  "reps": [
+    {
+      "name": "Vicky",
+      "target_usd": 50000,
+      "achievement_usd": 5715.0,
+      "payment_received_usd": 5715.0
+    },
+    {
+      "name": "Yogi",
+      "target_usd": 35000,
+      "achievement_usd": 32889.0,
+      "payment_received_usd": 22090.0,
+      "adjustments": [
+        {
+          "deal_name": "Yieldstreet - Willow Wealth",
+          "period": "Q4 FY2025",
+          "paid_amount_usd": 17068,
+          "rate_pct": 2,
+          "commission_usd": 341,
+          "note": "Pending payment from Q4 FY2025; commission paid at Q4 rate (2%)"
+        }
+      ]
+    },
+    {
+      "name": "Kritika",
+      "target_usd": 35000,
+      "achievement_usd": 21125.0,
+      "payment_received_usd": 21125.0
+    },
+    {
+      "name": "Lawrence",
+      "target_usd": 50000,
+      "achievement_usd": 6576.64,
+      "payment_received_usd": 3667.84
+    },
+    {
+      "name": "Deepak",
+      "target_usd": 35000,
+      "achievement_usd": 18984.0,
+      "payment_received_usd": 10742.0
+    },
+    {
+      "name": "Rutuja",
+      "target_usd": 10000,
+      "achievement_usd": 4520.0,
+      "payment_received_usd": 4520.0
+    }
+  ],
+  "commission": {
+    "exchange_rate_inr_per_usd": 86,
+    "eligibility_min_pct": 60,
+    "eligibility_text": "Monthly plan: a minimum of 60% achievement of the individual quota is required for commission. Below 60% → 0% slab. Managed-deal incentive (5%) applies only to the AM team.",
+    "reps": []
+  },
+  "manager_incentive": {
+    "manager_name": "Chitradip",
+    "team_label": "SMB",
+    "manager_team_minimum_pct": 60,
+    "rules_note": "Manager commission applies only if the team achieves a minimum of 60% of the monthly target.",
+    "pending_commissions": [
+      {
+        "deal_name": "Willow Wealth (Yogi)",
+        "deal_amount_usd": 17068.0,
+        "period": "Q4 FY2025",
+        "rate_pct": 1,
+        "commission_usd": 170.68,
+        "note": "Pending manager commission for Q4 FY2025 deal whose payment was received in April."
+      },
+      {
+        "deal_name": "Legal Soft (Larry)",
+        "deal_amount_usd": 20706.4,
+        "period": "Q1 FY2026",
+        "rate_pct": 1.5,
+        "commission_usd": 310.6,
+        "note": "Pending manager commission for Q1 FY2026 deal."
+      }
+    ],
+    "total_pending_commission_usd": 481.28,
+    "pending_commission_note": "Carried over from prior periods. Pending commissions are NOT subject to the April 60% team-achievement floor — they are paid based on the prior period's eligibility."
+  }
+}

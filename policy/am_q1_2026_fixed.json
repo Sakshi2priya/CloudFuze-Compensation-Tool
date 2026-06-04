@@ -1,0 +1,95 @@
+{
+  "_comment": "Pinned AM Q1 2026 quarterly compensation. Joy is the AM manager — her individual commission, manage deal, Q4 pending and Q4 Wipro clawback all roll up into the manager_incentive block (NOT into commission.reps). Bullet bars on the Sales Target view still include her achievement vs quota.",
+  "year": 2026,
+  "quarter": 1,
+  "team_target_usd": 250000,
+  "team_achievement_usd": 156801.40,
+  "reps": [
+    { "name": "Arundhati Sen", "target_usd": 50000,  "achievement_usd": 3600.00,   "payment_received_usd": 3600.00 },
+    { "name": "Vivin Joseph",  "target_usd": 100000, "achievement_usd": 61981.00,  "payment_received_usd": 60181.00 },
+    { "name": "Joy",           "target_usd": 100000, "achievement_usd": 91220.40,  "payment_received_usd": 36323.40 }
+  ],
+
+  "commission": {
+    "team_deduction_pct": 10,
+    "team_deduction_reason": "Reps without a manage deal closed in Q1 incur a 10% deduction on achieved commission.",
+    "manage_deal_incentive_pct": 10,
+    "exchange_rate_inr_per_usd": 86,
+    "eligibility_min_pct": 50,
+    "eligibility_text": "A minimum of 50% achievement of the individual quota is mandatory to qualify for commission payout.",
+    "reps": [
+      {
+        "name": "Arundhati Sen",
+        "group": "AM",
+        "quota_usd": 50000,
+        "revenue_achieved_usd": 3600.00,
+        "payment_received_usd": 3600.00,
+        "eligible_pct": 7,
+        "base_commission_usd": 0,
+        "deduction_pct": 0,
+        "manage_deal_usd": 0,
+        "manage_deal_paid_now_usd": 0,
+        "total_payout_usd": 0,
+        "note": "Below 50% achievement — not eligible"
+      },
+      {
+        "name": "Vivin Joseph",
+        "group": "AM",
+        "quota_usd": 100000,
+        "revenue_achieved_usd": 61981.00,
+        "payment_received_usd": 60181.00,
+        "eligible_pct": 62,
+        "base_commission_usd": 602,
+        "deduction_pct": 10,
+        "deduction_usd": 60,
+        "manage_deal_usd": 6300,
+        "manage_deal_paid_now_usd": 630,
+        "total_payout_usd": 1172,
+        "note": "Q1 base: 1% × $60,181 payment received = $602. −10% deduction = $542. Plus Q4 FY25 Vendasta CF Manage Deal: $6,300 × 10% = $630. Total = $1,172."
+      }
+    ]
+  },
+
+  "manager_incentive": {
+    "manager_name": "Joy",
+    "team_label": "Account Management",
+    "team_target_usd": 250000,
+    "team_achievement_usd": 156801.40,
+    "team_achievement_pct": 63,
+    "team_payment_received_usd": 100104.40,
+    "commission_rate_pct": 1.5,
+    "commission_basis": "team_payment_received",
+    "commission_basis_label": "Payment received",
+
+    "manager_q1_amount_usd": 1502,
+
+    "pending_commissions": [
+      {
+        "deal_name": "Krish Services Group — MARS overage",
+        "period": "Q4 FY2025",
+        "deal_amount_usd": 5500,
+        "rate_pct": 1,
+        "commission_usd": 55,
+        "note": "Q4 pending deal whose payment was received in Q1. Paid at Q4 rate (1%)."
+      }
+    ],
+    "total_pending_commission_usd": 55,
+
+    "clawbacks": [
+      {
+        "label": "Wipro Q4 cancellation — slab adjustment",
+        "period": "Q4 FY2025",
+        "deal_amount_usd": 54515,
+        "rate_pct": 3,
+        "deduction_usd": 1635,
+        "note": "Wipro deal $66,787 cancelled (Q4 slab was 4%; correct slab is 1%). Adjustment = $54,515 × 3% = $1,635 deducted in Q1."
+      }
+    ],
+    "total_clawback_usd": 1635,
+
+    "q1_gross_commission_usd": 1557,
+    "final_payout_usd": -78,
+    "carry_forward_usd": -78,
+    "calculation_note": "Q1 commission $1,502 + Q4 pending $55 = Q1 gross $1,557. Final = $1,557 − $1,635 (Q4 Wipro adjustment) = −$78. No payout for Q1 2026; the −$78 balance carries forward to the next compensation cycle."
+  }
+}

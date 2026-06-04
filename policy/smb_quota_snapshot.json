@@ -1,0 +1,14 @@
+{
+  "label": "Q1 2026 SMB individual targets (authoritative snapshot — HubSpot forecast not used)",
+  "group_a": {
+    "quota_usd_each": 150000,
+    "name_tokens": ["lawrence", "vicky", "royston"],
+    "note": "Group A total $450,000 (3 × $150,000)"
+  },
+  "group_b": {
+    "quota_usd_each": 100000,
+    "name_tokens": ["yogi", "yogesh", "yogesh.vig", "vig", "krithika", "kritika", "deepak", "karthik", "kartik"],
+    "policy_display_names": ["Yogesh Vig", "Deepak RJ", "Kritika Gupta", "Kartik Kashyap"],
+    "note": "Group B total $400,000 (4 × $100,000); Yogesh Vig (one rep; Yogesh.vig@cloudfuze.com); alternate spellings Kritika/Krithika, Kartik/Karthik"
+  }
+}
