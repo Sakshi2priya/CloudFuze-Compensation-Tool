@@ -72,6 +72,7 @@
       "target_usd": 35000,
       "achievement_usd": 32889.0,
       "payment_received_usd": 22090.0,
+      "total_payout_override_usd": 1004,
       "adjustments": [
         {
           "deal_name": "Yieldstreet - Willow Wealth",
@@ -93,13 +94,14 @@
       "name": "Lawrence",
       "target_usd": 50000,
       "achievement_usd": 6576.64,
-      "payment_received_usd": 3667.84
+      "payment_received_usd": 6576.64,
+      "left_org": true
     },
     {
       "name": "Deepak",
       "target_usd": 35000,
       "achievement_usd": 18984.0,
-      "payment_received_usd": 10742.0
+      "payment_received_usd": 18984.0
     },
     {
       "name": "Rutuja",
@@ -108,6 +110,37 @@
       "payment_received_usd": 4520.0
     }
   ],
+
+  "paid_deals": [
+    { "deal_name": "Azor - Google to google + Manage (bundle)", "deal_owner": "Yogesh Vig", "amount_usd": 1384, "close_date": "2026-04-29", "payment_status": "Paid" },
+    { "deal_name": "Scarab Genomics - Slack to Teams", "deal_owner": "Kritika Gupta", "amount_usd": 2000, "close_date": "2026-04-29", "payment_status": "Paid" },
+    { "deal_name": "DNASTAR - Slack to Teams", "deal_owner": "Kritika Gupta", "amount_usd": 2000, "close_date": "2026-04-29", "payment_status": "Paid" },
+    { "deal_name": "KOM Trails - Google to MS365 (Gmail & Drive)", "deal_owner": "Kritika Gupta", "amount_usd": 2276, "close_date": "2026-04-23", "payment_status": "Paid" },
+    { "deal_name": "Parkit 360 - Slack to GChat", "deal_owner": "Kritika Gupta", "amount_usd": 2762, "close_date": "2026-04-30", "payment_status": "Paid" },
+    { "deal_name": "Lightwave Logic - My Drive to OneDrive", "deal_owner": "Rutuja Kawade", "amount_usd": 4520, "close_date": "2026-04-23", "payment_status": "Paid" },
+    { "deal_name": "NexusOne - New Deal - Teams - Slack", "deal_owner": "Deepak R J", "amount_usd": 16484, "close_date": "2026-04-30", "payment_status": "Paid" },
+    { "deal_name": "Pizza Paradiso - Google Drives + Email + PS", "deal_owner": "Lawrence Lewis (Deactivated User)", "amount_usd": 2909, "close_date": "2026-04-28", "payment_status": "Paid" },
+    { "deal_name": "Mountain Christian Church - GWS to MS365", "deal_owner": "Lawrence Lewis (Deactivated User)", "amount_usd": 3668, "close_date": "2026-04-23", "payment_status": "Paid" },
+    { "deal_name": "Bitwise Investments - Google tenant to tenant migration", "deal_owner": "Yogesh Vig", "amount_usd": 6470, "close_date": "2026-04-30", "payment_status": "Paid" },
+    { "deal_name": "SKYTIDE GROUP - New Deal - Google Chat to Teams", "deal_owner": "Vicky Cariappa", "amount_usd": 2500, "close_date": "2026-04-08", "payment_status": "Paid" },
+    { "deal_name": "Joe's Computer Museum - Microsoft to Google tenant to tenant migration", "deal_owner": "Yogesh Vig", "amount_usd": 3596, "close_date": "2026-04-02", "payment_status": "Paid" },
+    { "deal_name": "Horberg Industries - MS365 Commercial to MS365 GCC Moderate", "deal_owner": "Kritika Gupta", "amount_usd": 12087, "close_date": "2026-04-01", "payment_status": "Paid" },
+    { "deal_name": "NFC Legal - New Deal - CloudFuze Manage", "deal_owner": "Vicky Cariappa", "amount_usd": 3215, "close_date": "2026-04-16", "payment_status": "Paid" },
+    { "deal_name": "IcebergIQ", "deal_owner": "Deepak R J", "amount_usd": 2500, "close_date": "2026-04-09", "payment_status": "Paid" },
+    { "deal_name": "SBG-Corp.com - Google Workspace to MS365 | Tenant to tenant", "deal_owner": "Yogesh Vig", "amount_usd": 10640, "close_date": "2026-04-30", "payment_status": "Paid" }
+  ],
+
+  "unpaid_deals_overrides": [
+    { "deal_name": "SBG-Corp.com - Microsoft tenant to tenant migration", "deal_owner": "Yogesh Vig", "amount_usd": 10799, "close_date": "2026-04-30", "payment_status": "Not Paid", "reason": "Payment not received at the time of April commission calculation." }
+  ],
+
+  "deals_summary": {
+    "total_deals_closed": 17,
+    "deals_payment_received": 16,
+    "deals_payment_not_received": 1,
+    "note": "17 deals closed in April 2026 (SMB team). 16 had payment received and 1 (SBG-Corp.com Microsoft tenant to tenant migration, Yogesh Vig, $10,799) had no payment received at the time of April commission calculation."
+  },
+
   "commission": {
     "exchange_rate_inr_per_usd": 86,
     "eligibility_min_pct": 60,

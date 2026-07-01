@@ -416,6 +416,11 @@ def compute_and_store_incentives(upload_id: int, period: str | None = None) -> T
             commission_pct = smb_manager_chitradip_team_commission_pct(achievement_pct)
         elif AM_QUOTA_ACHIEVEMENT_ENABLED and tname.strip() == ACCOUNT_MANAGEMENT_TEAM_NAME:
             commission_pct = am_team_commission_pct_from_team_achievement(achievement_pct)
+        elif tname.strip() == ENTERPRISE_TEAM_NAME:
+            # ENT uses its own bands: 0–75.99% → 7%, 76–100% → 9%, 101–125% → 11%, 126%+ → 13%.
+            # Min achievement for commission is 0% (any positive revenue qualifies).
+            from commission_policy import ent_team_commission_pct_from_achievement
+            commission_pct = ent_team_commission_pct_from_achievement(achievement_pct)
         else:
             commission_pct = team_commission_pct_from_achievement(achievement_pct)
         incentive_amount = total_team_revenue * (commission_pct / 100.0)

@@ -1,0 +1,163 @@
+{
+  "_comment": "Pinned ENT Q1 2026 numbers. Locks Anthony's Performance vs goal at $453,168.40 / $1,000,000 (45.3%). Three deals were marked Not Paid in HubSpot/manually (Estée Lauder, Experian, CloudSoft), so commission is calculated on the Payment Received amount ($254,293.90) at the ENT 45.3% → 7% tier rate.",
+  "year": 2026,
+  "quarter": 1,
+  "team_target_usd": 1000000,
+  "team_achievement_usd": 453168.40,
+  "team_payment_received_usd": 254293.90,
+  "reps": [
+    {
+      "name": "Anthony Raymond",
+      "target_usd": 1000000,
+      "achievement_usd": 453168.40,
+      "payment_received_usd": 254293.90
+    }
+  ],
+
+  "unpaid_deals_overrides": [
+    {
+      "deal_name": "The Estée Lauder Companies Inc. - Dropbox to SharePoint Online",
+      "amount_usd": 160000,
+      "close_date": "2026-02-06",
+      "reason": "Payment not received at the time of Q1 commission calculation."
+    },
+    {
+      "deal_name": "Experian Information Solutions, Inc. - Slack to Teams AIO",
+      "amount_usd": 4356,
+      "close_date": "2026-03-31",
+      "reason": "Payment not received at the time of Q1 commission calculation."
+    },
+    {
+      "deal_name": "CloudSoft - Google to MS",
+      "amount_usd": 34518.50,
+      "close_date": "2026-03-26",
+      "reason": "Payment not received at the time of Q1 commission calculation."
+    }
+  ],
+
+  "paid_deals": [
+    {
+      "deal_name": "ezCater - MS to MS",
+      "amount_usd": 12038,
+      "close_date": "2026-03-17",
+      "deal_owner": "Anthony Raymond"
+    },
+    {
+      "deal_name": "Bunsow De Mory LLP - Google to MS",
+      "amount_usd": 3300,
+      "close_date": "2026-03-05",
+      "deal_owner": "Anthony Raymond"
+    },
+    {
+      "deal_name": "NFL - Slack to Teams Phase 1",
+      "amount_usd": 18207,
+      "close_date": "2026-02-26",
+      "deal_owner": "Anthony Raymond"
+    },
+    {
+      "deal_name": "Deel - SPO to Google",
+      "amount_usd": 5322,
+      "close_date": "2026-03-27",
+      "deal_owner": "Anthony Raymond"
+    },
+    {
+      "deal_name": "TraceLink - Slack to Google Chat",
+      "amount_usd": 42300,
+      "close_date": "2026-02-04",
+      "deal_owner": "Anthony Raymond"
+    },
+    {
+      "deal_name": "MarketCast - Slack to Google Chat",
+      "amount_usd": 80750,
+      "close_date": "2026-02-09",
+      "deal_owner": "Anthony Raymond"
+    },
+    {
+      "deal_name": "Convex Insurance - Dropbox to Google _PAID POC",
+      "amount_usd": 2500,
+      "close_date": "2026-01-29",
+      "deal_owner": "Anthony Raymond"
+    },
+    {
+      "deal_name": "Cumulus Global - Chalkboard Ventures",
+      "amount_usd": 89876.90,
+      "close_date": "2026-02-03",
+      "deal_owner": "Anthony Raymond"
+    }
+  ],
+
+  "commission": {
+    "eligibility_min_pct": 0,
+    "eligibility_text": "ENT policy: minimum 0% achievement (any positive revenue qualifies). Slab bands: 0–75.99% → 7%, 76–100% → 9%, 101–125% → 11%, 126%+ → 13%.",
+    "exchange_rate_inr_per_usd": 0,
+    "reps": [
+      {
+        "name": "Anthony Raymond",
+        "group": "ENT",
+        "quota_usd": 1000000,
+        "revenue_achieved_usd": 453168.40,
+        "payment_received_usd": 254293.90,
+        "eligible_pct": 45,
+        "slab_pct": 7,
+        "base_commission_usd": 17800.57,
+        "manage_deal_usd": 0,
+        "manage_deal_paid_now_usd": 0,
+        "total_payout_usd": 22055.57,
+        "note": "ENT policy: 45.3% achievement lands in the 0–75.99% band → 7% commission. Base commission is calculated on Payment Received ($254,293.90), not booked revenue ($453,168.40), because three deals were Not Paid at the time of calculation (Estée Lauder $160,000, Experian $4,356, CloudSoft $34,518.50). Plus $5,130 in Q4 pending deals (Armstrong $2,801 + Chryselys $529 + Forvis Mazars $1,800), minus $875 refund clawback for the cancelled Cambrex Q4 deal = $22,055.57."
+      }
+    ]
+  },
+
+  "manager_incentive": {
+    "manager_name": "Anthony Raymond",
+    "team_label": "Enterprise",
+    "team_target_usd": 1000000,
+    "team_achievement_usd": 453168.40,
+    "team_achievement_pct": 45,
+    "team_payment_received_usd": 254293.90,
+    "manager_q1_amount_usd": 17800.57,
+
+    "pending_commissions": [
+      {
+        "deal_name": "Armstrong World Industries — BDO USA, LLP — Partner Deal",
+        "period": "Q4 FY2025",
+        "deal_amount_usd": 28008,
+        "rate_pct": 10,
+        "commission_usd": 2801,
+        "note": "Q4 FY2025 deal paid in Q1 2026 — commission at Q4 rate (10%)."
+      },
+      {
+        "deal_name": "Chryselys — Egnyte to MS SharePoint (Remaining 25%)",
+        "period": "Q4 FY2025",
+        "deal_amount_usd": 5292,
+        "rate_pct": 10,
+        "commission_usd": 529,
+        "note": "Q4 FY2025 remaining 25% payment received in Q1 — commission at Q4 rate (10%)."
+      },
+      {
+        "deal_name": "Forvis Mazars",
+        "period": "Q4 FY2025",
+        "deal_amount_usd": 18000,
+        "rate_pct": 10,
+        "commission_usd": 1800,
+        "note": "Q4 FY2025 additional payment received in Q1 2026 — commission at Q4 rate (10%): $18,000 × 10% = $1,800."
+      }
+    ],
+    "total_pending_commission_usd": 5130,
+
+    "clawbacks": [
+      {
+        "label": "Cambrex — Dropbox to MS (refund / cancellation)",
+        "period": "Q4 FY2025",
+        "deal_amount_usd": 8747,
+        "rate_pct": 10,
+        "deduction_usd": 875,
+        "note": "Q4 FY2025 Cambrex deal cancelled; $8,747 refunded. Commission previously paid at 10% Q4 rate is now clawed back: $8,747 × 10% = $875."
+      }
+    ],
+    "total_clawback_usd": 875,
+
+    "final_payout_usd": 22055.57,
+    "calculation_note": "Q1 base $17,800.57 (Payment Received $254,293.90 × 7% ENT slab) + Pending $5,130 (Armstrong $2,801 + Chryselys $529 + Forvis Mazars $1,800 — all Q4 deals at 10%) − Clawback $875 (Cambrex Q4 refund at 10%) = $22,055.57."
+  }
+}

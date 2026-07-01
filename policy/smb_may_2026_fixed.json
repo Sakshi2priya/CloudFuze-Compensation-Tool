@@ -1,0 +1,139 @@
+{
+  "_comment": "Pinned SMB May 2026 monthly compensation. Same structure as April. Team target $215,000. Team achievement $110,974 (51.6%) — below the 60% manager-team floor, so Chitradip earns no base commission for May. Lawrence Lewis is not on the May roster (left the org in April). Lennis Brown owned one May deal but is now a Deactivated User (left_org: true).",
+  "period_type": "monthly",
+  "year": 2026,
+  "month": 5,
+  "month_label": "May 2026",
+  "team_target_usd": 215000,
+  "team_achievement_usd": 110974,
+  "monthly_tiers": {
+    "min_achievement_pct_for_commission": 60,
+    "individual_tiers": [
+      { "min_pct": 0,   "max_pct": 60,   "commission_pct": 0 },
+      { "min_pct": 60,  "max_pct": 75,   "commission_pct": 2 },
+      { "min_pct": 76,  "max_pct": 99,   "commission_pct": 3 },
+      { "min_pct": 100, "max_pct": 125,  "commission_pct": 5 },
+      { "min_pct": 126, "max_pct": 150,  "commission_pct": 6 },
+      { "min_pct": 151, "max_pct": null, "commission_pct": 8 }
+    ],
+    "manager_tiers": [
+      { "min_pct": 60,  "max_pct": 80,   "commission_pct": 2 },
+      { "min_pct": 81,  "max_pct": 99,   "commission_pct": 3 },
+      { "min_pct": 100, "max_pct": null, "commission_pct": 4 }
+    ],
+    "manager_team_minimum_pct": 60,
+    "manage_deal_pct_am_only": 5
+  },
+  "reps": [
+    {
+      "name": "Vicky",
+      "target_usd": 50000,
+      "achievement_usd": 7450.0,
+      "payment_received_usd": 7450.0
+    },
+    {
+      "name": "Yogi",
+      "target_usd": 35000,
+      "achievement_usd": 31124.0,
+      "payment_received_usd": 17112.0,
+      "total_payout_override_usd": 1413.50,
+      "adjustments": [
+        {
+          "deal_name": "SBG-Corp.com - Microsoft Tenant to Tenant Migration",
+          "period": "April 2026",
+          "paid_amount_usd": 10640,
+          "rate_pct": 3,
+          "commission_usd": 319,
+          "note": "April 2026 deal paid in May — commission at May slab rate (3% based on 89% attainment)."
+        },
+        {
+          "deal_name": "Pending Commission Amount",
+          "period": "Prior period",
+          "commission_usd": 581.50,
+          "note": "Additional pending commission released in May payout."
+        }
+      ],
+      "note": "May base: $17,112 × 3% = $513. + April SBG-Corp.com payment received in May: $10,640 × 3% = $319. + Pending Commission Amount: $581.50. Total = $1,413.50."
+    },
+    {
+      "name": "Kritika",
+      "target_usd": 35000,
+      "achievement_usd": 39588.0,
+      "payment_received_usd": 39588.0,
+      "clawback_usd": 581.50,
+      "clawback_note": "May 2026 clawback adjustment — $581.50 deducted from gross commission.",
+      "total_payout_override_usd": 1397.90,
+      "note": "Gross commission $39,588 × 5% = $1,979.40. Clawback adjustment −$581.50. Net commission payable = $1,397.90."
+    },
+    {
+      "name": "Deepak",
+      "target_usd": 35000,
+      "achievement_usd": 0.0,
+      "payment_received_usd": 0.0
+    },
+    {
+      "name": "Rutuja",
+      "target_usd": 25000,
+      "achievement_usd": 16206.0,
+      "payment_received_usd": 16206.0
+    },
+    {
+      "name": "Lennis Brown",
+      "target_usd": 50000,
+      "achievement_usd": 16606.0,
+      "payment_received_usd": 16606.0,
+      "left_org": true
+    }
+  ],
+
+  "paid_deals": [
+    { "deal_name": "Bee Natural Honey - Domain transfer services only", "deal_owner": "Yogesh Vig", "amount_usd": 1000, "close_date": "2026-05-28", "payment_status": "Paid" },
+    { "deal_name": "AFScott - Gmail to Outlook", "deal_owner": "Kritika Gupta", "amount_usd": 5937, "close_date": "2026-05-27", "payment_status": "Paid" },
+    { "deal_name": "Protecht - Google to microsoft tenant to tenant", "deal_owner": "Yogesh Vig", "amount_usd": 4202, "close_date": "2026-05-29", "payment_status": "Paid" },
+    { "deal_name": "Inverson - New Deal - Dropbox to Google Workspace", "deal_owner": "Vicky Cariappa", "amount_usd": 4325, "close_date": "2026-05-29", "payment_status": "Paid" },
+    { "deal_name": "The Opus Group - Tenant to Tenant", "deal_owner": "Rutuja Kawade", "amount_usd": 10106, "close_date": "2026-05-27", "payment_status": "Paid" },
+    { "deal_name": "ICS Data - Commercial M365 to GCC High", "deal_owner": "Lennis Brown (Deactivated User)", "amount_usd": 16606, "close_date": "2026-05-26", "payment_status": "Paid" },
+    { "deal_name": "Centric GC - GW Tenant to Tenant", "deal_owner": "Kritika Gupta", "amount_usd": 5140, "close_date": "2026-05-14", "payment_status": "Paid" },
+    { "deal_name": "10th St. Talent - GW Tenant to Tenant", "deal_owner": "Kritika Gupta", "amount_usd": 2731, "close_date": "2026-05-05", "payment_status": "Paid" },
+    { "deal_name": "Medliant - Dropbox to MS365", "deal_owner": "Kritika Gupta", "amount_usd": 2500, "close_date": "2026-05-05", "payment_status": "Paid" },
+    { "deal_name": "AKJ - Meta to Viva", "deal_owner": "Yogesh Vig", "amount_usd": 5200, "close_date": "2026-05-04", "payment_status": "Paid" },
+    { "deal_name": "BOTZ - Teams to Slack", "deal_owner": "Rutuja Kawade", "amount_usd": 2500, "close_date": "2026-05-15", "payment_status": "Paid" },
+    { "deal_name": "Quartz Properties - Dropbox to Google Drive", "deal_owner": "Rutuja Kawade", "amount_usd": 3600, "close_date": "2026-05-08", "payment_status": "Paid" },
+    { "deal_name": "DME Capital Management, LP - Egnyte to SharePoint", "deal_owner": "Kritika Gupta", "amount_usd": 2500, "close_date": "2026-05-13", "payment_status": "Paid" },
+    { "deal_name": "Roundhouse - Slack to Google chat", "deal_owner": "Yogesh Vig", "amount_usd": 6710, "close_date": "2026-05-08", "payment_status": "Paid" },
+    { "deal_name": "NETd Tech Services - MS365 Tenant to Tenant, NFS to SPO & Blob, PS", "deal_owner": "Kritika Gupta", "amount_usd": 20780, "close_date": "2026-05-28", "payment_status": "Paid" },
+    { "deal_name": "CGNET (Client Oceans 5) - New Deal - MS365 to Google | Outlook - Gmail", "deal_owner": "Vicky Cariappa", "amount_usd": 3125, "close_date": "2026-05-22", "payment_status": "Paid" }
+  ],
+
+  "unpaid_deals_overrides": [
+    { "deal_name": "Protecht - Box to SharePoint", "deal_owner": "Yogesh Vig", "amount_usd": 14012, "close_date": "2026-05-28", "payment_status": "Not Paid", "reason": "Payment not received at the time of May commission calculation." }
+  ],
+
+  "deals_summary": {
+    "total_deals_closed": 17,
+    "deals_payment_received": 16,
+    "deals_payment_not_received": 1,
+    "note": "17 May deals closed for the SMB team. 16 had payment received and 1 (Protecht - Box to SharePoint, Yogesh Vig, $14,012) had no payment received at the time of May commission calculation."
+  },
+
+  "commission": {
+    "exchange_rate_inr_per_usd": 86,
+    "eligibility_min_pct": 60,
+    "eligibility_text": "Monthly plan: a minimum of 60% achievement of the individual quota is required for commission. Below 60% → 0% slab. Managed-deal incentive (5%) applies only to the AM team.",
+    "reps": []
+  },
+
+  "manager_incentive": {
+    "manager_name": "Chitradip",
+    "team_label": "SMB",
+    "manager_team_minimum_pct": 60,
+    "rules_note": "Manager commission applies only if the team achieves a minimum of 60% of the monthly target. May team achievement is 51.6% ($110,974 / $215,000), which is below the 60% floor → Chitradip earns no base manager commission for May 2026.",
+    "team_target_usd": 215000,
+    "team_achievement_usd": 110974,
+    "team_achievement_pct": 52,
+    "team_payment_received_usd": 96962,
+    "manager_q1_amount_usd": 0,
+    "final_payout_usd": 0,
+    "calculation_note": "Team achievement 51.6% is below the 60% manager-team floor → base manager commission = $0 for May 2026."
+  }
+}

@@ -3,12 +3,65 @@
   "year": 2026,
   "quarter": 1,
   "team_target_usd": 250000,
-  "team_achievement_usd": 156801.40,
+  "team_achievement_usd": 156801,
+  "team_achievement_pct": 63,
   "reps": [
     { "name": "Arundhati Sen", "target_usd": 50000,  "achievement_usd": 3600.00,   "payment_received_usd": 3600.00 },
     { "name": "Vivin Joseph",  "target_usd": 100000, "achievement_usd": 61981.00,  "payment_received_usd": 60181.00 },
     { "name": "Joy",           "target_usd": 100000, "achievement_usd": 91220.40,  "payment_received_usd": 36323.40 }
   ],
+
+  "paid_deals": [
+    { "deal_name": "Nooks - New Deal - Additional 20 Users", "deal_owner": "Vivin Joseph", "amount_usd": 680, "close_date": "2026-03-30", "payment_status": "Paid" },
+    { "deal_name": "Ceribell - Existing Customer Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 2700, "close_date": "2026-03-30", "payment_status": "Paid" },
+    { "deal_name": "Variation Reduction Solutions, Inc. - New Deal - Existing", "deal_owner": "Vivin Joseph", "amount_usd": 1500, "close_date": "2026-03-27", "payment_status": "Paid" },
+    { "deal_name": "Ampleo - New Deal - Existing Customer - Overage", "deal_owner": "Arundhati Sen", "amount_usd": 1000, "close_date": "2026-03-25", "payment_status": "Paid" },
+    { "deal_name": "Chryselys - Overage - 2 Months", "deal_owner": "Joy Prakash", "amount_usd": 4500, "close_date": "2026-03-23", "payment_status": "Paid" },
+    { "deal_name": "I Support The Girls - Outlook to Gmail - Existing Customer - Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 475, "close_date": "2026-03-23", "payment_status": "Paid" },
+    { "deal_name": "Greene IS - New Deal - Existing Customer - Server Overage", "deal_owner": "Arundhati Sen", "amount_usd": 1000, "close_date": "2026-03-24", "payment_status": "Paid" },
+    { "deal_name": "Vatica Health - New Deal Existing Customer - Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 1000, "close_date": "2026-03-16", "payment_status": "Paid" },
+    { "deal_name": "Ole Smoky Distillery LLC - New Deal - Dropbox to Google Drive - Server Overage - Existing customer", "deal_owner": "Vivin Joseph", "amount_usd": 1600, "close_date": "2026-03-12", "payment_status": "Paid" },
+    { "deal_name": "Advent International - New Deal - Existing Customer Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 12600, "close_date": "2026-03-12", "payment_status": "Paid" },
+    { "deal_name": "EPIQ Design Solutions LLC - Google Drive to Microsoft 365 - New Deal", "deal_owner": "Vivin Joseph", "amount_usd": 2500, "close_date": "2026-03-16", "payment_status": "Paid" },
+    { "deal_name": "Vendasta - Beyond Private Label - Existing Customer - Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 1000, "close_date": "2026-03-16", "payment_status": "Paid" },
+    { "deal_name": "Krish Services Group - New Server", "deal_owner": "Joy Prakash", "amount_usd": 500, "close_date": "2026-03-09", "payment_status": "Paid" },
+    { "deal_name": "Armstrong World Industries - New Deal - Existing Customer Server overage", "deal_owner": "Vivin Joseph", "amount_usd": 4500, "close_date": "2026-03-12", "payment_status": "Paid" },
+    { "deal_name": "IT Solutions - Overage for Renovus Capital Partners", "deal_owner": "Arundhati Sen", "amount_usd": 1600, "close_date": "2026-03-06", "payment_status": "Paid" },
+    { "deal_name": "Travelier - New Deal - Existing Customer - Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 5414, "close_date": "2026-03-11", "payment_status": "Paid" },
+    { "deal_name": "Cheil Agency Network - Server Overage", "deal_owner": "Joy Prakash", "amount_usd": 5500, "close_date": "2026-02-27", "payment_status": "Paid" },
+    { "deal_name": "LegitScript - Existing Customer - Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 3000, "close_date": "2026-02-27", "payment_status": "Paid" },
+    { "deal_name": "Tunnel to Towers Foundation - Existing customer - Additional 50 users - Overage", "deal_owner": "Vivin Joseph", "amount_usd": 3755, "close_date": "2026-02-25", "payment_status": "Paid" },
+    { "deal_name": "Syndis - Existing Customer New Deal - Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 1500, "close_date": "2026-02-27", "payment_status": "Paid" },
+    { "deal_name": "TeamLogic IT of N. Milwaukee (Duet Resource Group) - New Deal - DropBox to OneDrive SharePoint - Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 1100, "close_date": "2026-03-25", "payment_status": "Paid" },
+    { "deal_name": "Ole Smoky Distillery LLC - New Deal - Dropbox to Google Drive - Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 1600, "close_date": "2026-02-23", "payment_status": "Paid" },
+    { "deal_name": "CorCystems Managed IT Services - New Deal - Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 1000, "close_date": "2026-02-26", "payment_status": "Paid" },
+    { "deal_name": "ProSites Inc - New Deal - S2T", "deal_owner": "Vivin Joseph", "amount_usd": 3303, "close_date": "2026-03-17", "payment_status": "Paid" },
+    { "deal_name": "Vatica Health - Existing Deal - Additional Server", "deal_owner": "Vivin Joseph", "amount_usd": 1000, "close_date": "2026-03-11", "payment_status": "Paid" },
+    { "deal_name": "Artnet - New Deal - MS to Google (paid portion)", "deal_owner": "Joy Prakash", "amount_usd": 11566, "close_date": "2026-03-03", "payment_status": "Partially Paid", "total_deal_value_usd": 23132, "is_partial": true },
+    { "deal_name": "株式会社サイカ - Xica - Slack to Google Chat Existing Customer Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 2500, "close_date": "2026-01-23", "payment_status": "Paid" },
+    { "deal_name": "Tunnel to Towers Foundation - Existing customer - Additional 74 users - Overage", "deal_owner": "Joy Prakash", "amount_usd": 1916, "close_date": "2026-01-14", "payment_status": "Paid" },
+    { "deal_name": "cadence - Existing Customer - Google to MS", "deal_owner": "Joy Prakash", "amount_usd": 4941, "close_date": "2026-03-26", "payment_status": "Paid" },
+    { "deal_name": "cadence - Overage - 1 month", "deal_owner": "Joy Prakash", "amount_usd": 3500, "close_date": "2026-01-26", "payment_status": "Paid" },
+    { "deal_name": "OneSpan - Existing customer - Server Overage", "deal_owner": "Joy Prakash", "amount_usd": 3400, "close_date": "2026-03-20", "payment_status": "Paid" },
+    { "deal_name": "Future Range - New Deal - Luzern - Tambo Google Drive to MS OneDrive & SPO", "deal_owner": "Vivin Joseph", "amount_usd": 7454, "close_date": "2026-01-22", "payment_status": "Paid" },
+    { "deal_name": "CitizenGO - Overage", "deal_owner": "Joy Prakash", "amount_usd": 500, "close_date": "2026-03-17", "payment_status": "Paid" }
+  ],
+
+  "unpaid_deals_overrides": [
+    { "deal_name": "Allied Gold - New Deal - Existing Customer - Server Overage", "deal_owner": "Vivin Joseph", "amount_usd": 1800, "close_date": "2026-03-24", "payment_status": "Not Paid", "reason": "Payment not received at the time of Q1 commission calculation." },
+    { "deal_name": "The Estée Lauder Companies - Additional servers and data", "deal_owner": "Joy Prakash", "amount_usd": 26416, "close_date": "2026-03-18", "payment_status": "Not Paid", "reason": "Payment not received at the time of Q1 commission calculation." },
+    { "deal_name": "Artnet - New Deal - MS to Google (unpaid remainder)", "deal_owner": "Joy Prakash", "amount_usd": 11566, "close_date": "2026-03-03", "payment_status": "Partially Paid", "total_deal_value_usd": 23132, "is_partial_remainder": true, "reason": "Remaining 50% of the Artnet deal ($23,132 total) not yet received." },
+    { "deal_name": "Church & Dwight Co., Inc. - Existing MSP Client - Slack to Teams", "deal_owner": "Joy Prakash", "amount_usd": 14615, "close_date": "2026-01-27", "payment_status": "Not Paid", "reason": "Payment not received at the time of Q1 commission calculation." },
+    { "deal_name": "NerdsToGo - New Deal - DropBox to MS (for Carolina Contracting)", "deal_owner": "Nikita Shekher", "amount_usd": 2300, "close_date": "2026-02-25", "payment_status": "Not Paid", "reason": "Payment not received at the time of Q1 commission calculation." }
+  ],
+
+  "deals_summary": {
+    "total_deals_closed": 37,
+    "deals_payment_received": 33,
+    "deals_payment_not_received": 4,
+    "deals_partially_paid": 1,
+    "note": "Total of 37 unique deals closed in Q1. 33 had payment received (including 1 partially-paid Artnet deal), and 4 had no payment received."
+  },
 
   "commission": {
     "team_deduction_pct": 10,
@@ -54,7 +107,7 @@
     "manager_name": "Joy",
     "team_label": "Account Management",
     "team_target_usd": 250000,
-    "team_achievement_usd": 156801.40,
+    "team_achievement_usd": 156801,
     "team_achievement_pct": 63,
     "team_payment_received_usd": 100104.40,
     "commission_rate_pct": 1.5,

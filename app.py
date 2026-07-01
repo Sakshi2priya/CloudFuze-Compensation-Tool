@@ -256,8 +256,14 @@ def _team_goal_achievement_pct_value(row: dict, team_goal_by_id: dict):
 
 
 def _manager_incentive_zero_reason(row: dict, team_goal_by_id: dict) -> str:
-    """Short note when manager incentive is $0 (e.g. below minimum team achievement vs goal)."""
-    from commission_policy import SMB_MIN_ACHIEVEMENT_FOR_COMMISSION_PCT
+    """Short note when manager incentive is $0 — team-aware so ENT doesn't get the SMB 50% floor."""
+    from commission_policy import (
+        ACCOUNT_MANAGEMENT_TEAM_NAME,
+        AM_MIN_ACHIEVEMENT_FOR_COMMISSION_PCT,
+        ENTERPRISE_TEAM_NAME,
+        SMB_MIN_ACHIEVEMENT_FOR_COMMISSION_PCT,
+        SMB_TEAM_NAME,
+    )
 
     try:
         amt = float(row.get("incentive_amount") or 0)
@@ -268,8 +274,20 @@ def _manager_incentive_zero_reason(row: dict, team_goal_by_id: dict) -> str:
     ach = _team_goal_achievement_pct_value(row, team_goal_by_id)
     if ach is None:
         return "No team goal set"
-    if ach < SMB_MIN_ACHIEVEMENT_FOR_COMMISSION_PCT:
-        return f"Below {SMB_MIN_ACHIEVEMENT_FOR_COMMISSION_PCT:.0f}% team goal achievement"
+
+    # Pick the right minimum-achievement floor for this team.
+    team_name = (row.get("team_name") or "").strip()
+    if team_name == SMB_TEAM_NAME:
+        team_min = float(SMB_MIN_ACHIEVEMENT_FOR_COMMISSION_PCT or 0)
+    elif team_name == ACCOUNT_MANAGEMENT_TEAM_NAME:
+        team_min = float(AM_MIN_ACHIEVEMENT_FOR_COMMISSION_PCT or 0)
+    elif team_name == ENTERPRISE_TEAM_NAME:
+        team_min = 0.0  # ENT policy: minimum achievement is 0%, bands start at 0–75.99% → 7%.
+    else:
+        team_min = float(SMB_MIN_ACHIEVEMENT_FOR_COMMISSION_PCT or 0)
+
+    if team_min > 0 and ach < team_min:
+        return f"Below {team_min:.0f}% team goal achievement"
     try:
         pct = float(row.get("incentive_percentage") or 0)
     except (TypeError, ValueError):
@@ -280,15 +298,42 @@ def _manager_incentive_zero_reason(row: dict, team_goal_by_id: dict) -> str:
 
 
 def _enrich_team_incentives_display(df: pd.DataFrame) -> pd.DataFrame:
-    """Add **Team goal achievement %** and **Payout note** for manager incentive rows."""
+    """Add **Team goal achievement %**, recompute ENT incentive on-the-fly (using ENT bands),
+    and add **Payout note**.
+
+    The on-the-fly ENT recomputation is needed because rows already stored in the database
+    were computed with the old shared thresholds; this corrects the display without requiring
+    the user to re-finalize the upload.
+    """
     if df.empty:
         return df
+    from commission_policy import ENTERPRISE_TEAM_NAME, ent_team_commission_pct_from_achievement
+
     team_goal_by_id = {t["team_id"]: t.get("team_goal") for t in get_all_teams()}
     out = df.copy()
     out["Team goal achievement %"] = out.apply(
         lambda r: _team_goal_achievement_pct_value(r.to_dict(), team_goal_by_id),
         axis=1,
     )
+
+    # Recompute ENT rows so the displayed incentive_percentage / incentive_amount match the
+    # ENT policy bands (0–75.99 → 7%, 76–100 → 9%, 101–125 → 11%, 126%+ → 13%).
+    def _recompute_ent(r):
+        if (r.get("team_name") or "").strip() != ENTERPRISE_TEAM_NAME:
+            return r
+        ach = _team_goal_achievement_pct_value(r.to_dict(), team_goal_by_id) or 0.0
+        new_pct = ent_team_commission_pct_from_achievement(float(ach))
+        try:
+            rev = float(r.get("total_team_revenue") or 0)
+        except (TypeError, ValueError):
+            rev = 0.0
+        new_amt = round(rev * new_pct / 100.0, 2)
+        r["incentive_percentage"] = new_pct
+        r["incentive_amount"] = new_amt
+        return r
+
+    out = out.apply(_recompute_ent, axis=1)
+
     out["Payout note"] = out.apply(
         lambda r: _manager_incentive_zero_reason(r.to_dict(), team_goal_by_id),
         axis=1,
@@ -476,32 +521,177 @@ def _quarter_for_date_range(start_d, end_d) -> tuple[int, int]:
     return int(end_d.year), _quarter_of_month(end_d.month)
 
 
+def _get_user_rep_name_matchers(user: dict | None) -> list[str] | None:
+    """Return the list of lowercase rep-name substrings that match the current user.
+
+    Used to filter pinned Q1 / April / May data so each user sees only their own row
+    and deals (deal_owner, reps[], commission.reps[]).
+
+    - ADMIN → returns None (no filter; sees everything)
+    - Every other role (SALES_REP, SALES_MANAGER, or anything else) → returns a list
+      of matchers derived from full_name + known aliases. Managers who match their own
+      manager_name (Chitradip, Joy, Anthony) will still see their manager_incentive block;
+      everyone else's data is hidden from them.
+    - No/empty user or missing full_name → None (no filter — cautious default)
+    """
+    if not user:
+        return None
+    role = (user.get("role") or "").upper()
+    if role == "ADMIN":
+        return None  # Admins see everything
+    full_name = (user.get("full_name") or "").strip().lower()
+    if not full_name:
+        return None
+    matchers: list[str] = [full_name]
+    first_name = (full_name.split() or [""])[0]
+    if first_name and first_name != full_name:
+        matchers.append(first_name)
+    # Explicit alias mapping (short rep names used in reps[] JSON vs full user names).
+    _aliases = {
+        "yogesh vig": ["yogi", "yogesh"],
+        "yogesh": ["yogi"],
+        "vicky cariappa": ["vicky"],
+        "kritika gupta": ["kritika"],
+        "deepak r j": ["deepak"],
+        "rutuja kawade": ["rutuja"],
+        "joy prakash": ["joy"],
+        "vivin joseph": ["vivin"],
+        "lawrence lewis": ["lawrence", "larry"],
+        "royston aden": ["royston"],
+        "kartik kashyap": ["kartik"],
+        "lennis brown": ["lennis"],
+        "chitradip": ["chit"],
+        "anthony raymond": ["anthony"],
+        "arundhati sen": ["arundhati"],
+    }
+    for key, extras in _aliases.items():
+        if key in full_name or full_name in key:
+            matchers.extend(extras)
+    # Deduplicate, preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in matchers:
+        if m and m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
+def _rep_name_matches_user(rep_or_owner: str, matchers: list[str] | None) -> bool:
+    """Check whether a rep name / deal_owner string matches any of the current user's matchers.
+
+    Strips the "(Deactivated User)" suffix before comparing so deactivated deal owners
+    still match their user name.
+    """
+    if not matchers:
+        # No filter → matches everything
+        return True
+    low = (rep_or_owner or "").lower().replace(" (deactivated user)", "").strip()
+    if not low:
+        return False
+    for m in matchers:
+        if not m:
+            continue
+        if m == low or m in low or low in m:
+            return True
+        # Match on first word (e.g. "vicky" matches "vicky cariappa" and vice versa)
+        first_low = low.split()[0] if low else ""
+        first_m = m.split()[0] if m else ""
+        if first_low and first_m and (first_low == first_m):
+            return True
+    return False
+
+
+def _filter_pinned_for_user(pinned: dict, user: dict | None) -> dict:
+    """Return a filtered copy of pinned data showing only the current user's rows/deals.
+
+    If the user is ADMIN or SALES_MANAGER (matchers is None), returns pinned unchanged.
+    Otherwise filters:
+      - ``reps`` to only the user's rep entry
+      - ``paid_deals`` / ``unpaid_deals_overrides`` to only the user's deals
+      - ``commission.reps`` to only the user's row
+      - ``manager_incentive`` blanked unless the user IS the manager
+      - ``deals_summary`` recomputed from the filtered deal lists
+    Team-level fields (``team_target_usd``, ``team_achievement_usd``, ``manager_incentive.team_*``)
+    are left intact so the user can still see how their contribution rolls into team performance.
+    """
+    matchers = _get_user_rep_name_matchers(user)
+    if not matchers or not pinned:
+        return pinned
+
+    filtered = dict(pinned)
+
+    # Filter reps
+    filtered["reps"] = [
+        r for r in (pinned.get("reps") or [])
+        if _rep_name_matches_user(r.get("name") or "", matchers)
+    ]
+    # Filter deals by deal_owner
+    filtered["paid_deals"] = [
+        d for d in (pinned.get("paid_deals") or [])
+        if _rep_name_matches_user(d.get("deal_owner") or "", matchers)
+    ]
+    filtered["unpaid_deals_overrides"] = [
+        d for d in (pinned.get("unpaid_deals_overrides") or [])
+        if _rep_name_matches_user(d.get("deal_owner") or "", matchers)
+    ]
+    # Filter commission.reps
+    if pinned.get("commission"):
+        comm = dict(pinned["commission"])
+        comm["reps"] = [
+            c for c in (pinned["commission"].get("reps") or [])
+            if _rep_name_matches_user(c.get("name") or "", matchers)
+        ]
+        filtered["commission"] = comm
+    # Manager incentive: keep only if user IS the manager
+    mgr = pinned.get("manager_incentive") or {}
+    mgr_name = mgr.get("manager_name") or ""
+    if mgr_name and _rep_name_matches_user(mgr_name, matchers):
+        filtered["manager_incentive"] = mgr
+    else:
+        # Blank the manager_incentive so managers' payouts don't leak to reps
+        filtered["manager_incentive"] = {}
+    # Recompute deals_summary from filtered deal lists
+    _paid_n = len(filtered["paid_deals"])
+    _unpaid_n = sum(
+        1 for d in filtered["unpaid_deals_overrides"]
+        if not d.get("is_partial_remainder") and not d.get("is_cancelled")
+    )
+    _cancelled_n = sum(1 for d in filtered["unpaid_deals_overrides"] if d.get("is_cancelled"))
+    filtered["deals_summary"] = {
+        "total_deals_closed": _paid_n + _unpaid_n,
+        "deals_payment_received": _paid_n,
+        "deals_payment_not_received": _unpaid_n,
+        "deals_cancelled": _cancelled_n,
+        "note": "Filtered to your personal view. Team-level totals still shown for context.",
+    }
+    return filtered
+
+
 def _close_date_picker(key_prefix: str, default_preset: str = "This quarter"):
-    """Render the Close-date dropdown (+ optional custom range inputs) and resolve to a date range.
+    """Render the Close-date picker as a Custom date range only (From / To).
+
+    All preset options (This/Last quarter, This/Last month, YTD, etc.) have been
+    removed — Q1 & monthly data are locked from pinned JSON files and the user only
+    needs to select a custom From/To range that maps to the desired period.
 
     Returns: (start_date, end_date, label, year, quarter) — year/quarter are derived from the
     range using :func:`_quarter_for_date_range` and feed downstream policy lookups.
     """
     today = datetime.now().date()
-    default_idx = _CLOSE_DATE_PRESETS.index(default_preset) if default_preset in _CLOSE_DATE_PRESETS else 0
-    preset = st.selectbox(
-        "Close date",
-        list(_CLOSE_DATE_PRESETS),
-        index=default_idx,
-        key=f"{key_prefix}_close_date_preset",
+    # Sensible default From/To based on the caller's requested default preset — so the
+    # first render still lands on the intended quarter/month range without a preset UI.
+    def_start, def_end = _resolve_close_date_range(default_preset, today=today)
+    st.markdown("**Close date — Custom date range**")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        cs = st.date_input("From", value=def_start, key=f"{key_prefix}_close_date_from")
+    with col_b:
+        ce = st.date_input("To", value=def_end, key=f"{key_prefix}_close_date_to")
+    start_d, end_d = _resolve_close_date_range(
+        "Custom date range", today=today, custom_start=cs, custom_end=ce
     )
-    cs = ce = None
-    if preset == "Custom date range":
-        col_a, col_b = st.columns(2)
-        with col_a:
-            cs = st.date_input("From", value=today, key=f"{key_prefix}_close_date_from")
-        with col_b:
-            ce = st.date_input("To", value=today, key=f"{key_prefix}_close_date_to")
-    start_d, end_d = _resolve_close_date_range(preset, today=today, custom_start=cs, custom_end=ce)
-    if preset == "Custom date range":
-        label = f"{start_d:%b %d, %Y} – {end_d:%b %d, %Y}"
-    else:
-        label = preset
+    label = f"{start_d:%b %d, %Y} – {end_d:%b %d, %Y}"
     yr, qt = _quarter_for_date_range(start_d, end_d)
     return start_d, end_d, label, yr, qt
 
@@ -958,7 +1148,19 @@ def render_pinned_monthly_team_view(pinned: dict, team_label: str) -> None:
     Shows: monthly quota table, eligibility/policy summary, per-rep Commission summary with
     Slab %, Achievement %, Eligibility reason, Base commission, Manage Deal (AM only), and
     Total Payout. Also renders a small manager-incentive summary applying the 60% team floor.
+
+    User-level filtering: if the logged-in user is a SALES_REP, the pinned dict is filtered
+    to show only their row/deals/commission. ADMIN and SALES_MANAGER see the full team.
     """
+    # Filter pinned data to the current user's view (SALES_REPs see only their own row).
+    _current_user = st.session_state.get("user") if hasattr(st, "session_state") else None
+    _user_matchers = _get_user_rep_name_matchers(_current_user)
+    if _user_matchers:
+        pinned = _filter_pinned_for_user(pinned, _current_user)
+        st.info(
+            f"🔒 **Personal view** — showing only your data for {pinned.get('month_label') or 'this month'}. "
+            "Team totals are shown for context so you can see how your contribution rolls up."
+        )
     tiers = pinned.get("monthly_tiers") or {}
     ind_tiers = tiers.get("individual_tiers") or []
     mgr_tiers = tiers.get("manager_tiers") or []
@@ -1008,93 +1210,99 @@ def render_pinned_monthly_team_view(pinned: dict, team_label: str) -> None:
     # ---- Quota + summary ----
     st.markdown(f"### {label} — {team_label} Monthly Plan")
 
-    # HubSpot fetch — owner filter + button
+    # HubSpot fetch is disabled here because monthly commission cycles have already
+    # been processed. Re-fetching from HubSpot would not reflect the correct
+    # payment-received cutoff for the month. All numbers come from the pinned JSON
+    # file. To re-enable the fetch UI for an open month, set
+    # `COMP_TOOL_ENABLE_IMPORTS=1` in `.env`.
+    _monthly_imports_enabled = (os.environ.get("COMP_TOOL_ENABLE_IMPORTS") or "").strip() in ("1", "true", "yes")
     _team_prefix = "am" if is_am else "smb"
     _month_lbl = _MONTH_ABBR_LONG[int(pinned.get('month') or 4)].title()
 
-    # Load HubSpot owners (cached) so the user can choose a subset for the fetch.
-    _token_for_owners = get_access_token()
-    _owner_choices: list[str] = []
-    _owner_id_by_label: dict[str, str] = {}
-    _default_owner_labels: list[str] = []
-    if _token_for_owners:
-        try:
-            _ck = _hubspot_cache_key(_token_for_owners)
-            _owners_cache = _cached_hubspot_owners(_ck, _token_for_owners)
-            for _o in (_owners_cache or []):
-                _oid = str(_o.get("id", ""))
-                _em = (_o.get("email") or "").strip()
-                _fn = f"{(_o.get('firstName') or '')} {(_o.get('lastName') or '')}".strip()
-                _archived = bool(_o.get("_archived"))
-                _lbl_core = (f"{_fn} ({_em})" if _em else (_fn or _oid)).strip() or _oid
-                _lbl = f"{_lbl_core} — deactivated" if _archived else _lbl_core
-                _owner_choices.append(_lbl)
-                _owner_id_by_label[_lbl] = _oid
-        except Exception:
-            pass
-        # Pre-select owners whose first-name matches a pinned rep token.
-        _rep_tokens = {
-            (r.get("name") or "").strip().split(" ")[0].lower()
-            for r in (pinned.get("reps") or [])
-            if (r.get("name") or "").strip()
-        }
-        _rep_tokens.discard("")
-        # Alias map (short name → full HubSpot label substring)
-        _alias = {"yogi": "yogesh", "larry": "lawrence", "lawrence": "lawrence"}
-        for lbl in _owner_choices:
-            low = lbl.lower()
-            for tok in _rep_tokens:
-                target = _alias.get(tok, tok)
-                if target and target in low:
-                    _default_owner_labels.append(lbl)
-                    break
+    if _monthly_imports_enabled:
+        # Load HubSpot owners (cached) so the user can choose a subset for the fetch.
+        _token_for_owners = get_access_token()
+        _owner_choices: list[str] = []
+        _owner_id_by_label: dict[str, str] = {}
+        _default_owner_labels: list[str] = []
+        if _token_for_owners:
+            try:
+                _ck = _hubspot_cache_key(_token_for_owners)
+                _owners_cache = _cached_hubspot_owners(_ck, _token_for_owners)
+                for _o in (_owners_cache or []):
+                    _oid = str(_o.get("id", ""))
+                    _em = (_o.get("email") or "").strip()
+                    _fn = f"{(_o.get('firstName') or '')} {(_o.get('lastName') or '')}".strip()
+                    _archived = bool(_o.get("_archived"))
+                    _lbl_core = (f"{_fn} ({_em})" if _em else (_fn or _oid)).strip() or _oid
+                    _lbl = f"{_lbl_core} — deactivated" if _archived else _lbl_core
+                    _owner_choices.append(_lbl)
+                    _owner_id_by_label[_lbl] = _oid
+            except Exception:
+                pass
+            # Pre-select owners whose first-name matches a pinned rep token.
+            _rep_tokens = {
+                (r.get("name") or "").strip().split(" ")[0].lower()
+                for r in (pinned.get("reps") or [])
+                if (r.get("name") or "").strip()
+            }
+            _rep_tokens.discard("")
+            # Alias map (short name → full HubSpot label substring)
+            _alias = {"yogi": "yogesh", "larry": "lawrence", "lawrence": "lawrence"}
+            for lbl in _owner_choices:
+                low = lbl.lower()
+                for tok in _rep_tokens:
+                    target = _alias.get(tok, tok)
+                    if target and target in low:
+                        _default_owner_labels.append(lbl)
+                        break
 
-    st.markdown("**HubSpot fetch**")
-    with st.container(border=True):
-        if _owner_choices:
-            _picked_owners = st.multiselect(
-                "Deal owners (HubSpot)",
-                options=_owner_choices,
-                default=_default_owner_labels,
-                key=f"monthly_owner_pick_{_team_prefix}_{pinned.get('year')}_{pinned.get('month')}",
-                help=(
-                    "Restrict the fetch to specific HubSpot owners. Defaults to the owners whose first name matches "
-                    "a pinned rep. Clear the list to fetch all owners matching the User Management roster."
-                ),
-            )
-            _picked_owner_ids = [_owner_id_by_label[l] for l in _picked_owners if l in _owner_id_by_label]
-        else:
-            _picked_owner_ids = []
-            if not _token_for_owners:
-                st.caption("Set `HUBSPOT_ACCESS_TOKEN` in `.env` to enable the owner filter and fetch.")
+        st.markdown("**HubSpot fetch**")
+        with st.container(border=True):
+            if _owner_choices:
+                _picked_owners = st.multiselect(
+                    "Deal owners (HubSpot)",
+                    options=_owner_choices,
+                    default=_default_owner_labels,
+                    key=f"monthly_owner_pick_{_team_prefix}_{pinned.get('year')}_{pinned.get('month')}",
+                    help=(
+                        "Restrict the fetch to specific HubSpot owners. Defaults to the owners whose first name matches "
+                        "a pinned rep. Clear the list to fetch all owners matching the User Management roster."
+                    ),
+                )
+                _picked_owner_ids = [_owner_id_by_label[l] for l in _picked_owners if l in _owner_id_by_label]
             else:
-                st.caption("No HubSpot owners loaded (token may be invalid or lacks `crm.objects.owners.read`).")
-
-        bt_col1, bt_col2 = st.columns([1, 3])
-        with bt_col1:
-            if st.button(
-                f"🔄 Fetch {_month_lbl} from HubSpot",
-                key=f"fetch_monthly_{_team_prefix}_{pinned.get('year')}_{pinned.get('month')}",
-                type="primary",
-                disabled=not _token_for_owners,
-            ):
-                with st.spinner("Fetching deals from HubSpot…"):
-                    ok, msg = _fetch_monthly_actuals_from_hubspot(
-                        pinned,
-                        _team_prefix,
-                        extra_owner_ids=(_picked_owner_ids or None),
-                    )
-                if ok:
-                    st.success(msg)
-                    st.rerun()
+                _picked_owner_ids = []
+                if not _token_for_owners:
+                    st.caption("Set `HUBSPOT_ACCESS_TOKEN` in `.env` to enable the owner filter and fetch.")
                 else:
-                    st.error(msg)
-        with bt_col2:
-            st.caption(
-                "Pulls closed-won deals from HubSpot whose **Close date** falls inside this month, "
-                "matches owners to the rep roster via User Management email, and updates the pinned JSON in place. "
-                "Up to 3 retries on transient connection errors."
-            )
+                    st.caption("No HubSpot owners loaded (token may be invalid or lacks `crm.objects.owners.read`).")
+
+            bt_col1, bt_col2 = st.columns([1, 3])
+            with bt_col1:
+                if st.button(
+                    f"🔄 Fetch {_month_lbl} from HubSpot",
+                    key=f"fetch_monthly_{_team_prefix}_{pinned.get('year')}_{pinned.get('month')}",
+                    type="primary",
+                    disabled=not _token_for_owners,
+                ):
+                    with st.spinner("Fetching deals from HubSpot…"):
+                        ok, msg = _fetch_monthly_actuals_from_hubspot(
+                            pinned,
+                            _team_prefix,
+                            extra_owner_ids=(_picked_owner_ids or None),
+                        )
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+            with bt_col2:
+                st.caption(
+                    "Pulls closed-won deals from HubSpot whose **Close date** falls inside this month, "
+                    "matches owners to the rep roster via User Management email, and updates the pinned JSON in place. "
+                    "Up to 3 retries on transient connection errors."
+                )
 
     # KPI cards: show the RAW HubSpot total in the "Achieved" card so the user can see
     # what came back from the fetch. The exception (e.g. Joy's Washington Post split) is
@@ -1134,6 +1342,274 @@ def render_pinned_monthly_team_view(pinned: dict, team_label: str) -> None:
             f"</tr></tbody></table></div>"
         )
         st.markdown(breakdown_html, unsafe_allow_html=True)
+
+    # ---- Deal-count strip + deal-owner / per-owner breakdown (Q1-style, for monthly) ----
+    paid_deals_m = pinned.get("paid_deals") or []
+    unpaid_deals_m = pinned.get("unpaid_deals_overrides") or []
+    deals_summary_m = pinned.get("deals_summary") or {}
+    if paid_deals_m or unpaid_deals_m:
+        _paid_count_m = len(paid_deals_m)
+        _unpaid_count_m = sum(1 for d in unpaid_deals_m if not d.get("is_partial_remainder") and not d.get("is_cancelled"))
+        _cancelled_m = [d for d in unpaid_deals_m if d.get("is_cancelled")]
+        _total_closed_m = int(deals_summary_m.get("total_deals_closed") or (_paid_count_m + _unpaid_count_m))
+        _paid_sum_m = sum(float(d.get("amount_usd") or 0) for d in paid_deals_m)
+        _unpaid_sum_m = sum(float(d.get("amount_usd") or 0) for d in unpaid_deals_m if not d.get("is_cancelled"))
+        _combined_m = _paid_sum_m + _unpaid_sum_m
+
+        st.markdown(
+            "<div style='display:grid;grid-template-columns:repeat(3, 1fr);gap:12px;margin-top:14px;'>"
+            "<div style='background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:14px 16px;'>"
+            "<div style='font-size:12px;font-weight:600;color:#3730a3;text-transform:uppercase;letter-spacing:0.5px;'>📦 Total deals closed</div>"
+            f"<div style='font-size:32px;font-weight:700;color:#1e3a8a;margin-top:4px;'>{_total_closed_m}</div>"
+            f"<div style='font-size:12px;color:#475569;margin-top:2px;'>Combined value: ${_combined_m:,.2f}</div>"
+            "</div>"
+            "<div style='background:#ecfdf5;border:1px solid #86efac;border-radius:10px;padding:14px 16px;'>"
+            "<div style='font-size:12px;font-weight:600;color:#166534;text-transform:uppercase;letter-spacing:0.5px;'>✅ Payment received</div>"
+            f"<div style='font-size:32px;font-weight:700;color:#14532d;margin-top:4px;'>{_paid_count_m} <span style='font-size:16px;font-weight:500;'>deal(s)</span></div>"
+            f"<div style='font-size:12px;color:#166534;margin-top:2px;'>Total: ${_paid_sum_m:,.2f}</div>"
+            "</div>"
+            "<div style='background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;padding:14px 16px;'>"
+            "<div style='font-size:12px;font-weight:600;color:#991b1b;text-transform:uppercase;letter-spacing:0.5px;'>❌ Payment not received</div>"
+            f"<div style='font-size:32px;font-weight:700;color:#7f1d1d;margin-top:4px;'>{_unpaid_count_m} <span style='font-size:16px;font-weight:500;'>deal(s)</span></div>"
+            f"<div style='font-size:12px;color:#991b1b;margin-top:2px;'>Excluded value: ${_unpaid_sum_m:,.2f}</div>"
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ---- Deal owner breakdown table ----
+        # Alias map: deal_owner full names → rep short names in reps[]
+        _monthly_owner_alias = {
+            # SMB reps
+            "yogesh vig": "yogi",
+            "kritika gupta": "kritika",
+            "vicky cariappa": "vicky",
+            "deepak r j": "deepak",
+            "rutuja kawade": "rutuja",
+            "lawrence lewis": "lawrence",
+            "royston aden": "royston",
+            "kartik kashyap": "kartik",
+            # AM reps
+            "vivin joseph": "vivin",
+            "joy prakash": "joy",
+            # Arundhati Sen matches the rep name directly (no alias needed)
+        }
+        def _monthly_normalize_owner(o: str) -> str:
+            base = (o or "").replace(" (Deactivated User)", "").strip().lower()
+            return _monthly_owner_alias.get(base, base)
+
+        _rep_lookup_m = {(r.get("name") or "").strip().lower(): r for r in reps}
+        m_owners: dict[str, dict] = {}
+        for d in paid_deals_m:
+            o = m_owners.setdefault(d.get("deal_owner") or "—", {"paid_n": 0, "unpaid_n": 0, "booked_d": 0.0, "paid_d": 0.0, "pending_d": 0.0})
+            amt = float(d.get("amount_usd") or 0)
+            o["paid_n"] += 1
+            o["paid_d"] += amt
+            o["booked_d"] += amt
+        for d in unpaid_deals_m:
+            if d.get("is_cancelled"):
+                continue
+            o = m_owners.setdefault(d.get("deal_owner") or "—", {"paid_n": 0, "unpaid_n": 0, "booked_d": 0.0, "paid_d": 0.0, "pending_d": 0.0})
+            amt = float(d.get("amount_usd") or 0)
+            o["unpaid_n"] += 1
+            o["booked_d"] += amt
+            o["pending_d"] += amt
+
+        st.markdown("#### Deal owner breakdown")
+        st.caption(f"Per-rep summary of {team_label} deals closed in {label} — Total deals, Payment received vs not received, Booked Amount, $ received and $ pending. Booked Amount and $ Payment received use the official rep totals from the JSON (rounded to whole dollars).")
+        m_owner_rows: list[str] = []
+        m_sum_total = m_sum_paid = m_sum_unpaid = 0
+        m_sum_booked_off = m_sum_paid_off = 0.0
+        m_sum_pending = 0.0
+        for owner, o in sorted(m_owners.items(), key=lambda kv: (-(kv[1]["paid_n"] + kv[1]["unpaid_n"]), kv[0])):
+            tot = o["paid_n"] + o["unpaid_n"]
+            m_sum_total += tot
+            m_sum_paid += o["paid_n"]
+            m_sum_unpaid += o["unpaid_n"]
+            m_sum_pending += o["pending_d"]
+            rep_key = _monthly_normalize_owner(owner)
+            rep_entry = _rep_lookup_m.get(rep_key)
+            if rep_entry:
+                booked_disp = round(float(rep_entry.get("achievement_usd") or 0))
+                paid_disp = float(rep_entry.get("payment_received_usd") or 0)
+            else:
+                booked_disp = o["booked_d"]
+                paid_disp = o["paid_d"]
+            m_sum_booked_off += booked_disp
+            m_sum_paid_off += paid_disp
+            m_owner_rows.append(
+                "<tr>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;'><strong>{html_module.escape(owner)}</strong></td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>{tot}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#166534;'><strong>{o['paid_n']}</strong></td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#991b1b;'><strong>{o['unpaid_n']}</strong></td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>${booked_disp:,.2f}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#166534;'>${paid_disp:,.2f}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#991b1b;'>${o['pending_d']:,.2f}</td>"
+                "</tr>"
+            )
+        m_official_booked = float(pinned.get("team_achievement_usd") or m_sum_booked_off)
+        m_official_paid = m_sum_paid_off
+        m_owner_rows.append(
+            "<tr style='background:#fef9c3;font-weight:700;'>"
+            f"<td style='padding:10px 12px;'>Total ({team_label} team)</td>"
+            f"<td style='padding:10px 12px;text-align:right;'>{m_sum_total}</td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#166534;'>{m_sum_paid}</td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#991b1b;'>{m_sum_unpaid}</td>"
+            f"<td style='padding:10px 12px;text-align:right;'>${m_official_booked:,.2f}</td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#14532d;'>${m_official_paid:,.2f}</td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#7f1d1d;'>${m_sum_pending:,.2f}</td>"
+            "</tr>"
+        )
+        st.markdown(
+            "<div style='width:100%;overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;margin-top:6px;margin-bottom:18px;'>"
+            "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+            "<thead><tr style='background:#e0f2fe;color:#075985;'>"
+            "<th style='text-align:left;padding:10px 12px;font-weight:600;'>Deal Owner</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Total deals</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Payment received deals</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'># Payment not received</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Booked Amount</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>$ Payment received</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>$ Payment Pending</th>"
+            f"</tr></thead><tbody>{''.join(m_owner_rows)}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+
+        # ---- Per-owner expander with Excel export ----
+        with st.expander(f"📋 See every {team_label} deal grouped by owner", expanded=False):
+            m_own_paid: dict[str, list[dict]] = {}
+            m_own_unpaid: dict[str, list[dict]] = {}
+            for d in paid_deals_m:
+                m_own_paid.setdefault(d.get("deal_owner") or "—", []).append(d)
+            for d in unpaid_deals_m:
+                m_own_unpaid.setdefault(d.get("deal_owner") or "—", []).append(d)
+
+            import pandas as _pd
+            _m_xls_rows: list[dict] = []
+            for owner in sorted(set(list(m_own_paid.keys()) + list(m_own_unpaid.keys()))):
+                for d in m_own_paid.get(owner, []):
+                    _m_xls_rows.append({
+                        "Deal Owner": owner,
+                        "Deal": d.get("deal_name") or "",
+                        "Close date": d.get("close_date") or "",
+                        "Status": d.get("payment_status") or "Paid",
+                        "Amount (USD)": float(d.get("amount_usd") or 0),
+                        "Payment Receipt Amount (USD)": float(d.get("amount_usd") or 0),
+                        "Pending (USD)": 0.0,
+                    })
+                for d in m_own_unpaid.get(owner, []):
+                    _m_xls_rows.append({
+                        "Deal Owner": owner,
+                        "Deal": d.get("deal_name") or "",
+                        "Close date": d.get("close_date") or "",
+                        "Status": d.get("payment_status") or "Not Paid",
+                        "Amount (USD)": float(d.get("amount_usd") or 0),
+                        "Payment Receipt Amount (USD)": 0.0,
+                        "Pending (USD)": float(d.get("amount_usd") or 0),
+                    })
+            try:
+                _m_xls = _pinned_export_to_excel_bytes({f"All {team_label} deals by owner": _pd.DataFrame(_m_xls_rows)})
+                _team_short_dl = (team_label or "team").lower().replace(" ", "_")
+                _mo_int = int(pinned.get("month") or 4)
+                _yr_int = int(pinned.get("year") or 2026)
+                st.download_button(
+                    label=f"📥 Export all {team_label} deals grouped by owner (Excel)",
+                    data=_m_xls,
+                    file_name=f"{_team_short_dl}_{_yr_int}_{_mo_int:02d}_deals_by_owner.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_monthly_deals_by_owner_{_team_short_dl}_{_yr_int}_{_mo_int:02d}",
+                )
+            except Exception:
+                pass
+
+            _grand_amt_m = 0.0
+            _grand_paid_m = 0.0
+            _grand_n_m = 0
+            for owner in sorted(set(list(m_own_paid.keys()) + list(m_own_unpaid.keys()))):
+                p_list = m_own_paid.get(owner, [])
+                u_list = m_own_unpaid.get(owner, [])
+                p_sum = sum(float(d.get("amount_usd") or 0) for d in p_list)
+                u_sum = sum(float(d.get("amount_usd") or 0) for d in u_list if not d.get("is_cancelled"))
+                deal_n = len(p_list) + sum(1 for d in u_list if not d.get("is_cancelled"))
+                _grand_amt_m += p_sum + u_sum
+                _grand_paid_m += p_sum
+                _grand_n_m += deal_n
+                _received_chip = f"<span style='color:#166534;font-size:13px;font-weight:500;'>· ${p_sum:,.2f} received</span>"
+                _not_received_chip = (
+                    f" <span style='color:#991b1b;font-size:13px;font-weight:500;'>· ${u_sum:,.2f} not received</span>"
+                    if u_sum > 0 else ""
+                )
+                st.markdown(
+                    f"<div style='margin-top:14px;margin-bottom:6px;font-size:18px;font-weight:700;color:#0f172a;'>"
+                    f"{html_module.escape(owner)} — {deal_n} deal(s) {_received_chip}{_not_received_chip}"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                rows_h_m: list[str] = []
+                for d in p_list:
+                    dn = html_module.escape((d.get("deal_name") or "").strip())
+                    amt = float(d.get("amount_usd") or 0)
+                    cd = html_module.escape((d.get("close_date") or "").strip())
+                    rows_h_m.append(
+                        f"<tr style='background:#f0fdf4;'>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;'><strong>{dn}</strong></td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;text-align:right;'>{cd}</td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;text-align:right;color:#166534;'>Paid</td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;text-align:right;'><strong>${amt:,.2f}</strong></td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;text-align:right;color:#166534;'><strong>${amt:,.2f}</strong></td>"
+                        "</tr>"
+                    )
+                for d in u_list:
+                    dn = html_module.escape((d.get("deal_name") or "").strip())
+                    amt = float(d.get("amount_usd") or 0)
+                    cd = html_module.escape((d.get("close_date") or "").strip())
+                    status = html_module.escape((d.get("payment_status") or "Not Paid").strip())
+                    rows_h_m.append(
+                        f"<tr style='background:#fef2f2;'>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid #fecaca;'><strong>{dn}</strong></td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid #fecaca;text-align:right;'>{cd}</td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid #fecaca;text-align:right;color:#b91c1c;'>{status}</td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid #fecaca;text-align:right;'><strong>${amt:,.2f}</strong></td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid #fecaca;text-align:right;color:#b91c1c;'><strong>$0.00</strong></td>"
+                        "</tr>"
+                    )
+                rows_h_m.append(
+                    "<tr style='background:#fef9c3;font-weight:700;'>"
+                    f"<td style='padding:10px 12px;' colspan='2'>Total — {html_module.escape(owner)} ({deal_n} deal{'s' if deal_n != 1 else ''})</td>"
+                    f"<td style='padding:10px 12px;text-align:right;'></td>"
+                    f"<td style='padding:10px 12px;text-align:right;'>${(p_sum + u_sum):,.2f}</td>"
+                    f"<td style='padding:10px 12px;text-align:right;color:#166534;'>${p_sum:,.2f}</td>"
+                    "</tr>"
+                )
+                st.markdown(
+                    "<div style='width:100%;overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:14px;'>"
+                    "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+                    "<thead><tr style='background:#f1f5f9;color:#334155;'>"
+                    "<th style='text-align:left;padding:8px 12px;font-weight:600;'>Deal</th>"
+                    "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Close date</th>"
+                    "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Status</th>"
+                    "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Amount</th>"
+                    "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Payment Receipt Amount</th>"
+                    f"</tr></thead><tbody>{''.join(rows_h_m)}</tbody></table></div>",
+                    unsafe_allow_html=True,
+                )
+
+            _grand_pending_m = _grand_amt_m - _grand_paid_m
+            _official_booked_grand = float(pinned.get("team_achievement_usd") or _grand_amt_m)
+            _official_paid_grand = m_sum_paid_off if m_sum_paid_off else _grand_paid_m
+            st.markdown(
+                "<div style='margin-top:6px;padding:14px 16px;background:#fef3c7;border:2px solid #f59e0b;border-radius:10px;'>"
+                f"<div style='font-size:13px;font-weight:700;color:#78350f;text-transform:uppercase;letter-spacing:0.5px;'>🏷️ Grand total — {team_label} team (all owners)</div>"
+                "<div style='display:grid;grid-template-columns:repeat(4, 1fr);gap:12px;margin-top:8px;'>"
+                f"<div><div style='font-size:11px;color:#92400e;'>Total deals</div><div style='font-size:20px;font-weight:700;color:#78350f;'>{_grand_n_m}</div></div>"
+                f"<div><div style='font-size:11px;color:#92400e;'>Total Amount</div><div style='font-size:20px;font-weight:700;color:#78350f;'>${_official_booked_grand:,.2f}</div></div>"
+                f"<div><div style='font-size:11px;color:#92400e;'>Payment Receipt</div><div style='font-size:20px;font-weight:700;color:#166534;'>${_official_paid_grand:,.2f}</div></div>"
+                f"<div><div style='font-size:11px;color:#92400e;'>Pending</div><div style='font-size:20px;font-weight:700;color:#991b1b;'>${_grand_pending_m:,.2f}</div></div>"
+                "</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
     st.markdown("---")
 
@@ -1206,7 +1682,20 @@ def render_pinned_monthly_team_view(pinned: dict, team_label: str) -> None:
             eligible = False
             elig_status = "Left org"
             elig_color = "#6b7280"
-            reason = "Rep has left the organization — no payout. Their deals still count toward team total."
+            # Build a rep- + month-specific note, e.g. "Lawrence left the organization in April."
+            _first_name = (nm.split() or [nm])[0]
+            _month_word = ""
+            try:
+                _month_word = (pinned.get("month_label") or "").split()[0]
+            except Exception:
+                _month_word = ""
+            if _month_word:
+                reason = (
+                    f"{_first_name} left the organization in {_month_word}. "
+                    "No payout — their deals still count toward team total."
+                )
+            else:
+                reason = f"{_first_name} left the organization. No payout — their deals still count toward team total."
         else:
             elig_status = "Eligible" if eligible else "Not eligible"
             elig_color = "#15803d" if eligible else "#b91c1c"
@@ -1233,6 +1722,13 @@ def render_pinned_monthly_team_view(pinned: dict, team_label: str) -> None:
             )
             reason = (reason + (" · " if reason else "") + f"Adjustments: {extras}") if (reason or extras) else reason
         total_payout = round(base_comm + md_amount + adj_total, 2)
+        # Per-rep total override (pinned exact figure, e.g. Yogi's $1,004 rounded total).
+        _payout_override = r.get("total_payout_override_usd")
+        if _payout_override is not None:
+            try:
+                total_payout = round(float(_payout_override), 2)
+            except (TypeError, ValueError):
+                pass
         payout_inr = round(total_payout * inr_rate, 2) if inr_rate else 0.0
 
         base_total += base_comm
@@ -1361,7 +1857,19 @@ def render_pinned_monthly_team_view(pinned: dict, team_label: str) -> None:
 
 
 def render_pinned_am_quarterly_view(pinned: dict) -> None:
-    """Render the AM Q1 2026 (or any pinned AM quarter) Sales Target + Commission summary view."""
+    """Render the AM Q1 2026 (or any pinned AM quarter) Sales Target + Commission summary view.
+
+    User-level filtering: SALES_REPs see only their own row/deals/commission.
+    ADMIN and SALES_MANAGER see the full team.
+    """
+    _current_user = st.session_state.get("user") if hasattr(st, "session_state") else None
+    _user_matchers = _get_user_rep_name_matchers(_current_user)
+    if _user_matchers:
+        pinned = _filter_pinned_for_user(pinned, _current_user)
+        st.info(
+            f"🔒 **Personal view** — showing only your data for Q{pinned.get('quarter')} FY{pinned.get('year')}. "
+            "Team totals are shown for context."
+        )
     year = pinned.get("year")
     quarter = pinned.get("quarter")
     team_target = float(pinned.get("team_target_usd") or 0)
@@ -1392,10 +1900,11 @@ def render_pinned_am_quarterly_view(pinned: dict) -> None:
         st.caption(f"**Eligibility:** {elig_text}")
     if ded_reason:
         st.caption(f"**Deduction reason:** {ded_reason}")
+
     st.markdown("---")
 
-    # ---- Bullet bars ----
-    parts: list[str] = [
+    # ---- Performance vs goal (bullet bars) — moved to top of page to match SMB layout ----
+    perf_parts: list[str] = [
         '<div class="goal-attainment-wrap">',
         '<div class="ga-bullet-section">',
         '<p class="ga-bullet-section-title">Performance vs goal</p>',
@@ -1406,14 +1915,353 @@ def render_pinned_am_quarterly_view(pinned: dict) -> None:
             team_target,
         ),
     ]
-    for r in reps_top:
-        nm = (r.get("name") or "").strip()
-        ach = float(r.get("achievement_usd") or 0)
-        tgt = float(r.get("target_usd") or 0)
-        av = f'<div class="ga-avatar" aria-hidden="true">{html_module.escape(_initials_for_avatar(nm))}</div>'
-        parts.append(_bullet_chart_row_html(nm, "Individual quota", ach, tgt, initials_html=av))
-    parts.extend(["</div>", "</div>"])
-    st.markdown("".join(parts), unsafe_allow_html=True)
+    for _r in reps_top:
+        _nm = (_r.get("name") or "").strip()
+        _ach = float(_r.get("achievement_usd") or 0)
+        _tgt = float(_r.get("target_usd") or 0)
+        _av = f'<div class="ga-avatar" aria-hidden="true">{html_module.escape(_initials_for_avatar(_nm))}</div>'
+        perf_parts.append(_bullet_chart_row_html(_nm, "Individual quota", _ach, _tgt, initials_html=_av))
+    perf_parts.extend(["</div>", "</div>"])
+    st.markdown("".join(perf_parts), unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ---- Deal-count strip + deal-owner / rep-level breakdowns ----
+    paid_deals_am = pinned.get("paid_deals") or []
+    unpaid_deals_am = pinned.get("unpaid_deals_overrides") or []
+    deals_summary_am = pinned.get("deals_summary") or {}
+    if paid_deals_am or unpaid_deals_am:
+        # Build unique-deal sets (Artnet appears in both arrays as partial paid + partial remainder).
+        partial_keys = {d.get("deal_name") for d in paid_deals_am if d.get("is_partial")}
+        partial_remainder_keys = {d.get("deal_name") for d in unpaid_deals_am if d.get("is_partial_remainder")}
+        # Count fully-paid + partial-paid (any payment received)
+        any_payment_count = len(paid_deals_am)  # includes the partial-paid Artnet
+        # Count fully-not-paid (excluding the partial remainder for Artnet)
+        fully_unpaid_count = sum(1 for d in unpaid_deals_am if not d.get("is_partial_remainder"))
+        # Total deals closed
+        partial_paid_count = len(partial_keys)
+        total_closed = (any_payment_count - partial_paid_count) + fully_unpaid_count + partial_paid_count
+        total_closed = int(deals_summary_am.get("total_deals_closed") or total_closed)
+
+        paid_sum_am = sum(float(d.get("amount_usd") or 0) for d in paid_deals_am)
+        unpaid_sum_am = sum(float(d.get("amount_usd") or 0) for d in unpaid_deals_am)
+        combined_value = paid_sum_am + unpaid_sum_am
+
+        st.markdown(
+            "<div style='display:grid;grid-template-columns:repeat(3, 1fr);gap:12px;margin-top:14px;'>"
+            # Card 1 — Total closed
+            "<div style='background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:14px 16px;'>"
+            "<div style='font-size:12px;font-weight:600;color:#3730a3;text-transform:uppercase;letter-spacing:0.5px;'>📦 Total deals closed</div>"
+            f"<div style='font-size:32px;font-weight:700;color:#1e3a8a;margin-top:4px;'>{total_closed}</div>"
+            f"<div style='font-size:12px;color:#475569;margin-top:2px;'>Combined value: ${combined_value:,.2f}</div>"
+            "</div>"
+            # Card 2 — Payment received
+            "<div style='background:#ecfdf5;border:1px solid #86efac;border-radius:10px;padding:14px 16px;'>"
+            "<div style='font-size:12px;font-weight:600;color:#166534;text-transform:uppercase;letter-spacing:0.5px;'>✅ Payment received</div>"
+            f"<div style='font-size:32px;font-weight:700;color:#14532d;margin-top:4px;'>{any_payment_count} <span style='font-size:16px;font-weight:500;'>deal(s)</span></div>"
+            f"<div style='font-size:12px;color:#166534;margin-top:2px;'>Total: ${paid_sum_am:,.2f}"
+            + (f" · incl. {partial_paid_count} partially paid" if partial_paid_count else "")
+            + "</div>"
+            "</div>"
+            # Card 3 — Payment NOT received
+            "<div style='background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;padding:14px 16px;'>"
+            "<div style='font-size:12px;font-weight:600;color:#991b1b;text-transform:uppercase;letter-spacing:0.5px;'>❌ Payment not received</div>"
+            f"<div style='font-size:32px;font-weight:700;color:#7f1d1d;margin-top:4px;'>{fully_unpaid_count} <span style='font-size:16px;font-weight:500;'>deal(s)</span></div>"
+            f"<div style='font-size:12px;color:#991b1b;margin-top:2px;'>Excluded value: ${unpaid_sum_am:,.2f}</div>"
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ---- Deal owner breakdown ----
+        # Aggregate by deal_owner. For each owner we compute:
+        #   - paid_count: deals with payment received (incl. partial-paid)
+        #   - partial_paid_count: count of partial-paid deals (annotation only)
+        #   - unpaid_count: deals with NO payment received (excl. partial-remainder)
+        #   - partial_unpaid_count: partial-remainder count (annotation only)
+        #   - booked_amount: sum of total deal values (partial deals counted as full value)
+        #   - paid_usd: payment received
+        #   - pending_usd: payment pending
+        owners: dict[str, dict] = {}
+        def _bump_paid(owner: str, total_value: float, paid_value: float, is_partial: bool):
+            o = owners.setdefault(owner or "—", {
+                "paid_count": 0, "unpaid_count": 0,
+                "partial_paid_count": 0, "partial_unpaid_count": 0,
+                "booked_amount": 0.0, "paid_usd": 0.0, "pending_usd": 0.0,
+            })
+            o["paid_count"] += 1
+            o["paid_usd"] += paid_value
+            o["booked_amount"] += total_value
+            if is_partial:
+                o["partial_paid_count"] += 1
+                # The unpaid portion of a partial paid deal contributes to pending
+                o["pending_usd"] += max(total_value - paid_value, 0)
+
+        def _bump_unpaid(owner: str, amount: float, is_partial_remainder: bool):
+            o = owners.setdefault(owner or "—", {
+                "paid_count": 0, "unpaid_count": 0,
+                "partial_paid_count": 0, "partial_unpaid_count": 0,
+                "booked_amount": 0.0, "paid_usd": 0.0, "pending_usd": 0.0,
+            })
+            if is_partial_remainder:
+                # Don't double-count booked or pending — the partial-paid side already booked the full value
+                # and added the pending portion. Just record the annotation count.
+                o["partial_unpaid_count"] += 1
+            else:
+                o["unpaid_count"] += 1
+                o["booked_amount"] += amount
+                o["pending_usd"] += amount
+
+        for d in paid_deals_am:
+            is_partial = bool(d.get("is_partial"))
+            total_v = float(d.get("total_deal_value_usd") or d.get("amount_usd") or 0) if is_partial else float(d.get("amount_usd") or 0)
+            _bump_paid(d.get("deal_owner") or "", total_v, float(d.get("amount_usd") or 0), is_partial)
+        for d in unpaid_deals_am:
+            _bump_unpaid(d.get("deal_owner") or "", float(d.get("amount_usd") or 0), bool(d.get("is_partial_remainder")))
+
+        st.markdown("#### Deal owner breakdown")
+        st.caption("Per-rep summary of deals closed in Q1 — Total deals, Payment received vs not received, Booked Amount, $ received and $ pending.")
+        owner_rows: list[str] = []
+        sum_total = 0
+        sum_paid = 0
+        sum_unpaid = 0
+        sum_partial_paid = 0
+        sum_partial_unpaid = 0
+        sum_booked = 0.0
+        sum_paid_usd = 0.0
+        sum_pending_usd = 0.0
+        # Sort by total deal count desc, then by name
+        for owner, o in sorted(owners.items(), key=lambda kv: (-(kv[1]["paid_count"] + kv[1]["unpaid_count"]), kv[0])):
+            paid_ct = o["paid_count"]
+            unpaid_ct = o["unpaid_count"]
+            partial_paid_ct = o["partial_paid_count"]
+            partial_unpaid_ct = o["partial_unpaid_count"]
+            total_ct = paid_ct + unpaid_ct
+            sum_total += total_ct
+            sum_paid += paid_ct
+            sum_unpaid += unpaid_ct
+            sum_partial_paid += partial_paid_ct
+            sum_partial_unpaid += partial_unpaid_ct
+            sum_booked += o["booked_amount"]
+            sum_paid_usd += o["paid_usd"]
+            sum_pending_usd += o["pending_usd"]
+            # Format the count cells with the partial annotation in line
+            paid_cell = f"{paid_ct}" + (f" <span style='color:#ca8a04;font-size:11px;font-weight:500;'>({partial_paid_ct}-Partial Paid)</span>" if partial_paid_ct else "")
+            unpaid_cell = f"{unpaid_ct}" + (f" <span style='color:#ca8a04;font-size:11px;font-weight:500;'>({partial_unpaid_ct}-Partial Payment not received)</span>" if partial_unpaid_ct else "")
+            owner_rows.append(
+                "<tr>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;'><strong>{html_module.escape(owner)}</strong></td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>{total_ct}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#166534;'><strong>{paid_cell}</strong></td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#991b1b;'><strong>{unpaid_cell}</strong></td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>${o['booked_amount']:,.2f}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#166534;'>${o['paid_usd']:,.2f}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#991b1b;'>${o['pending_usd']:,.2f}</td>"
+                "</tr>"
+            )
+        # Total row
+        total_paid_cell = f"{sum_paid}" + (f" <span style='color:#ca8a04;font-size:11px;font-weight:500;'>({sum_partial_paid}-Partial Paid)</span>" if sum_partial_paid else "")
+        total_unpaid_cell = f"{sum_unpaid}" + (f" <span style='color:#ca8a04;font-size:11px;font-weight:500;'>({sum_partial_unpaid}-Partial Payment not received)</span>" if sum_partial_unpaid else "")
+        owner_rows.append(
+            "<tr style='background:#fef9c3;font-weight:700;'>"
+            f"<td style='padding:10px 12px;'>Total (AM team)</td>"
+            f"<td style='padding:10px 12px;text-align:right;'>{sum_total}</td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#166534;'>{total_paid_cell}</td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#991b1b;'>{total_unpaid_cell}</td>"
+            f"<td style='padding:10px 12px;text-align:right;'>${sum_booked:,.2f}</td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#14532d;'>${sum_paid_usd:,.2f}</td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#7f1d1d;'>${sum_pending_usd:,.2f}</td>"
+            "</tr>"
+        )
+        st.markdown(
+            "<div style='width:100%;overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;margin-top:6px;margin-bottom:18px;'>"
+            "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+            "<thead><tr style='background:#e0f2fe;color:#075985;'>"
+            "<th style='text-align:left;padding:10px 12px;font-weight:600;'>Deal Owner</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Total deals</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Payment received deals</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'># Payment not received</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Booked Amount</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>$ Payment received</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>$ Payment Pending</th>"
+            f"</tr></thead><tbody>{''.join(owner_rows)}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+
+        # ---- Per-owner deal lists (expander per rep) ----
+        official_team_paid = float((pinned.get("manager_incentive") or {}).get("team_payment_received_usd") or paid_sum_am)
+
+        # Build a *unified, deduplicated* per-owner deal list. Artnet appears in both
+        # paid_deals (partial-paid portion) and unpaid_deals_overrides (partial remainder);
+        # we merge those into a single row showing Amount (total deal value) and
+        # Payment Receipt Amount (the paid portion).
+        def _normalize_deal_key(name: str) -> str:
+            # Strip the "(paid portion)" / "(unpaid remainder)" suffixes used for partial
+            # deals so they collapse to the same key.
+            s = (name or "").strip().lower()
+            for tag in (" (paid portion)", " (unpaid remainder)", " (paid)", " (unpaid)"):
+                if s.endswith(tag):
+                    s = s[: -len(tag)].strip()
+            return s
+
+        unified_by_owner: dict[str, list[dict]] = {}
+        # First pass — paid deals (gives us each deal's paid portion)
+        for d in paid_deals_am:
+            owner = d.get("deal_owner") or "—"
+            key = _normalize_deal_key(d.get("deal_name") or "")
+            is_partial = bool(d.get("is_partial"))
+            amount = float(d.get("total_deal_value_usd") or d.get("amount_usd") or 0) if is_partial else float(d.get("amount_usd") or 0)
+            paid = float(d.get("amount_usd") or 0)
+            # Display name without the "(paid portion)" suffix when we're merging
+            display_name = (d.get("deal_name") or "").replace(" (paid portion)", "").replace(" (paid)", "").strip()
+            unified_by_owner.setdefault(owner, []).append({
+                "_key": key,
+                "deal_name": display_name,
+                "close_date": d.get("close_date") or "",
+                "status": d.get("payment_status") or "Paid",
+                "amount_usd": amount,
+                "paid_amount_usd": paid,
+                "is_partial": is_partial,
+            })
+        # Second pass — unpaid deals. If the same normalized key already exists, merge;
+        # otherwise add as a new row (Not Paid → amount=full value, paid=$0).
+        for d in unpaid_deals_am:
+            owner = d.get("deal_owner") or "—"
+            key = _normalize_deal_key(d.get("deal_name") or "")
+            is_partial_rem = bool(d.get("is_partial_remainder"))
+            owner_rows = unified_by_owner.setdefault(owner, [])
+            existing = next((r for r in owner_rows if r["_key"] == key), None)
+            if existing and is_partial_rem:
+                # Merge into the existing partial-paid row. Use the full deal value if known,
+                # else paid + unpaid_remainder.
+                full_value = float(d.get("total_deal_value_usd") or 0) or (existing["paid_amount_usd"] + float(d.get("amount_usd") or 0))
+                existing["amount_usd"] = full_value
+                existing["status"] = "Partially Paid"
+            else:
+                display_name = (d.get("deal_name") or "").replace(" (unpaid remainder)", "").replace(" (unpaid)", "").strip()
+                owner_rows.append({
+                    "_key": key,
+                    "deal_name": display_name,
+                    "close_date": d.get("close_date") or "",
+                    "status": d.get("payment_status") or "Not Paid",
+                    "amount_usd": float(d.get("amount_usd") or 0),
+                    "paid_amount_usd": 0.0,
+                    "is_partial": False,
+                })
+
+        with st.expander("📋 See every deal grouped by owner", expanded=False):
+            # ---- Excel export (all owners, unified rows) ----
+            import pandas as _pd
+            _all_deal_rows: list[dict] = []
+            for owner in sorted(unified_by_owner.keys()):
+                for r in unified_by_owner[owner]:
+                    _all_deal_rows.append({
+                        "Deal Owner": owner,
+                        "Deal": r["deal_name"],
+                        "Close date": r["close_date"],
+                        "Status": r["status"],
+                        "Amount (USD)": r["amount_usd"],
+                        "Payment Receipt Amount (USD)": r["paid_amount_usd"],
+                        "Pending (USD)": max(r["amount_usd"] - r["paid_amount_usd"], 0),
+                    })
+            _df_all = _pd.DataFrame(_all_deal_rows)
+            try:
+                _xls_bytes = _pinned_export_to_excel_bytes({"All deals by owner": _df_all})
+                st.download_button(
+                    label="📥 Export all deals grouped by owner (Excel)",
+                    data=_xls_bytes,
+                    file_name=f"am_q1_{pinned.get('year') or 2026}_deals_by_owner.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_am_deals_by_owner_xlsx",
+                    use_container_width=False,
+                )
+            except Exception:
+                pass
+
+            grand_amount_sum = 0.0
+            grand_paid_sum = 0.0
+            grand_unique = 0
+            for owner in sorted(unified_by_owner.keys()):
+                rows = unified_by_owner[owner]
+                owner_amount = sum(r["amount_usd"] for r in rows)
+                owner_paid = sum(r["paid_amount_usd"] for r in rows)
+                owner_pending = owner_amount - owner_paid
+                grand_amount_sum += owner_amount
+                grand_paid_sum += owner_paid
+                grand_unique += len(rows)
+                # Owner header (HTML block to avoid mixed markdown/HTML rendering bug)
+                received_chip = f"<span style='color:#166534;font-size:13px;font-weight:500;'>· ${owner_paid:,.2f} received</span>"
+                not_received_chip = (
+                    f" <span style='color:#991b1b;font-size:13px;font-weight:500;'>· ${owner_pending:,.2f} not received</span>"
+                    if owner_pending > 0 else ""
+                )
+                st.markdown(
+                    f"<div style='margin-top:14px;margin-bottom:6px;font-size:18px;font-weight:700;color:#0f172a;'>"
+                    f"{html_module.escape(owner)} — {len(rows)} deal(s) "
+                    f"{received_chip}{not_received_chip}"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                rows_h: list[str] = []
+                for r in rows:
+                    dn = html_module.escape(r["deal_name"])
+                    cd = html_module.escape(r["close_date"])
+                    status = r["status"]
+                    amount = r["amount_usd"]
+                    paid_amt = r["paid_amount_usd"]
+                    is_partial = (status == "Partially Paid")
+                    is_unpaid = (paid_amt == 0 and not is_partial)
+                    if is_partial:
+                        bg, border, badge_color = "#fef9c3", "#fde68a", "#854d0e"
+                    elif is_unpaid:
+                        bg, border, badge_color = "#fef2f2", "#fecaca", "#b91c1c"
+                    else:
+                        bg, border, badge_color = "#f0fdf4", "#bbf7d0", "#166534"
+                    rows_h.append(
+                        f"<tr style='background:{bg};'>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid {border};'><strong>{dn}</strong></td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid {border};text-align:right;'>{cd}</td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid {border};text-align:right;color:{badge_color};'>{html_module.escape(status)}</td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid {border};text-align:right;'><strong>${amount:,.2f}</strong></td>"
+                        f"<td style='padding:8px 12px;border-bottom:1px solid {border};text-align:right;color:{badge_color};'><strong>${paid_amt:,.2f}</strong></td>"
+                        f"</tr>"
+                    )
+                # Total row for this owner
+                rows_h.append(
+                    "<tr style='background:#fef9c3;font-weight:700;'>"
+                    f"<td style='padding:10px 12px;' colspan='2'>Total — {html_module.escape(owner)} ({len(rows)} deal{'s' if len(rows) != 1 else ''})</td>"
+                    f"<td style='padding:10px 12px;text-align:right;'></td>"
+                    f"<td style='padding:10px 12px;text-align:right;'>${owner_amount:,.2f}</td>"
+                    f"<td style='padding:10px 12px;text-align:right;color:#166534;'>${owner_paid:,.2f}</td>"
+                    "</tr>"
+                )
+                st.markdown(
+                    "<div style='width:100%;overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:14px;'>"
+                    "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+                    "<thead><tr style='background:#f1f5f9;color:#334155;'>"
+                    "<th style='text-align:left;padding:8px 12px;font-weight:600;'>Deal</th>"
+                    "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Close date</th>"
+                    "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Status</th>"
+                    "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Amount</th>"
+                    "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Payment Receipt Amount</th>"
+                    f"</tr></thead><tbody>{''.join(rows_h)}</tbody></table></div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Grand total row across all owners
+            grand_pending = grand_amount_sum - grand_paid_sum
+            st.markdown(
+                "<div style='margin-top:6px;padding:14px 16px;background:#fef3c7;border:2px solid #f59e0b;border-radius:10px;'>"
+                "<div style='font-size:13px;font-weight:700;color:#78350f;text-transform:uppercase;letter-spacing:0.5px;'>🏷️ Grand total — AM team (all owners)</div>"
+                "<div style='display:grid;grid-template-columns:repeat(4, 1fr);gap:12px;margin-top:8px;'>"
+                f"<div><div style='font-size:11px;color:#92400e;'>Total deals</div><div style='font-size:20px;font-weight:700;color:#78350f;'>{grand_unique}</div></div>"
+                f"<div><div style='font-size:11px;color:#92400e;'>Total Amount</div><div style='font-size:20px;font-weight:700;color:#78350f;'>${grand_amount_sum:,.2f}</div></div>"
+                f"<div><div style='font-size:11px;color:#92400e;'>Payment Receipt</div><div style='font-size:20px;font-weight:700;color:#166534;'>${grand_paid_sum:,.2f}</div></div>"
+                f"<div><div style='font-size:11px;color:#92400e;'>Pending</div><div style='font-size:20px;font-weight:700;color:#991b1b;'>${grand_pending:,.2f}</div></div>"
+                "</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
     # ---- Commission summary table (same column structure as SMB Q1) ----
     st.markdown("#### Commission summary")
@@ -1566,6 +2414,10 @@ def render_pinned_monthly_manager_view(pinned: dict, team_label: str) -> None:
     year = pinned.get("year")
     month = pinned.get("month")
     label = pinned.get("month_label") or f"{year}-{month:02d}"
+    # Month name for section labels (e.g. "May" or "April"), always derived from the pinned
+    # month integer so the manager incentive section titles/labels reflect the currently
+    # selected period — never a stale "April" when May is active.
+    month_name = (_MONTH_ABBR_LONG.get(int(month or 0), "").title() or label.split(" ")[0]).strip()
 
     reps = pinned.get("reps") or []
     team_target = float(pinned.get("team_target_usd") or 0)
@@ -1614,14 +2466,14 @@ def render_pinned_monthly_manager_view(pinned: dict, team_label: str) -> None:
 
     st.markdown("---")
 
-    # ---- Eligibility check (for April base only — pending commissions are NOT subject to this floor) ----
+    # ---- Eligibility check (for current-month base only — pending commissions are NOT subject to this floor) ----
     is_eligible = team_pct >= mgr_min
     if is_eligible:
         mgr_slab_pct, mgr_band = _monthly_slab_pct(mgr_tiers, team_pct)
         mgr_base_amt = round(team_paid * mgr_slab_pct / 100.0, 2)
         st.markdown(
             f"<div style='background:#dcfce7;border:1px solid #4ade80;border-radius:8px;padding:14px 18px;'>"
-            f"<div style='font-size:18px;font-weight:600;color:#14532d;'>✅ {mgr_name} is eligible for April base commission</div>"
+            f"<div style='font-size:18px;font-weight:600;color:#14532d;'>✅ {mgr_name} is eligible for {month_name} base commission</div>"
             f"<div style='margin-top:6px;color:#14532d;'>Team achievement <strong>{team_pct:.1f}%</strong> ≥ floor <strong>{int(mgr_min)}%</strong>. Slab band: <strong>{mgr_band}</strong>.</div>"
             f"</div>",
             unsafe_allow_html=True,
@@ -1631,7 +2483,7 @@ def render_pinned_monthly_manager_view(pinned: dict, team_label: str) -> None:
         mgr_base_amt = 0.0
         st.markdown(
             f"<div style='background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:14px 18px;'>"
-            f"<div style='font-size:18px;font-weight:600;color:#7f1d1d;'>❌ {mgr_name} is NOT eligible for April base commission</div>"
+            f"<div style='font-size:18px;font-weight:600;color:#7f1d1d;'>❌ {mgr_name} is NOT eligible for {month_name} base commission</div>"
             f"<div style='margin-top:6px;color:#7f1d1d;'>Team achievement is <strong>{team_pct:.1f}%</strong> of the ${team_target:,.0f} target, which is below the <strong>{int(mgr_min)}%</strong> floor. "
             f"Pending commissions from prior periods (below) are still paid.</div>"
             f"</div>",
@@ -1639,7 +2491,7 @@ def render_pinned_monthly_manager_view(pinned: dict, team_label: str) -> None:
         )
 
     # ---- Base calculation table ----
-    st.markdown(f"#### {mgr_name} — April base calculation")
+    st.markdown(f"#### {mgr_name} — {month_name} base calculation")
     st.markdown(
         f"<table style='border-collapse:collapse;font-size:13px;width:100%;border:1px solid #e5e7eb;border-radius:8px;'>"
         f"<thead><tr style='background:#ccfbf1;'>"
@@ -1651,7 +2503,7 @@ def render_pinned_monthly_manager_view(pinned: dict, team_label: str) -> None:
         f"<tr><td style='padding:8px 12px;border-bottom:1px solid #f1f1ef;'>Team payment received (basis)</td><td style='padding:8px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>${team_paid:,.0f}</td></tr>"
         f"<tr><td style='padding:8px 12px;border-bottom:1px solid #f1f1ef;'>Slab band</td><td style='padding:8px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>{mgr_band}</td></tr>"
         f"<tr><td style='padding:8px 12px;border-bottom:1px solid #f1f1ef;'>Commission rate</td><td style='padding:8px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>{mgr_slab_pct:.0f}%</td></tr>"
-        f"<tr style='background:#bbf7d0;font-weight:600;'><td style='padding:10px 12px;'>April base payout (USD)</td><td style='padding:10px 12px;text-align:right;color:#14532d;'>${mgr_base_amt:,.2f}</td></tr>"
+        f"<tr style='background:#bbf7d0;font-weight:600;'><td style='padding:10px 12px;'>{month_name} base payout (USD)</td><td style='padding:10px 12px;text-align:right;color:#14532d;'>${mgr_base_amt:,.2f}</td></tr>"
         + "</tbody></table>",
         unsafe_allow_html=True,
     )
@@ -2047,17 +2899,70 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
 
     inr_rate = float(summary.get("inr_rate_per_usd") or 0)
 
+    # Escape "\$" so Streamlit Markdown doesn't treat it as LaTeX math-mode.
     def _usd(x):
-        return f"${float(x):,.2f}"
+        return f"\\${float(x):,.2f}"
 
     def _inr(x):
-        return f"₹{float(x) * inr_rate:,.0f}" if inr_rate else "—"
+        return f"₹{float(x) * inr_rate:,.0f}" if inr_rate else ""
+
+    def _usd_with_inr(x):
+        """USD with optional INR appendix — used for inline mentions like "(≈ ₹XYZ)"."""
+        u = _usd(x)
+        if inr_rate:
+            return f"{u} (≈ {_inr(x)})"
+        return u
+
+    def _esc_md(s):
+        """Escape $ in JSON-derived text so it doesn't trigger Markdown math-mode."""
+        if not s:
+            return ""
+        return str(s).replace("\\$", "$").replace("$", "\\$")
 
     # Look up specific rep / manager
     rep_status_list = summary.get("rep_status") or []
     rep_payouts_list = summary.get("rep_payouts") or []
     mgr_summary = summary.get("manager_incentive_summary") or {}
     mgr_name_low = (mgr_summary.get("manager_name") or "").lower()
+    # Define team_summary early so the rep-narrative branch below can read the eligibility floor.
+    team_summary = summary.get("team") or {}
+
+    def _cross_period_note_for_rep(first_name: str) -> str:
+        """Look across other pinned files to see if this rep has notable status (e.g. left_org)
+        in another period — useful when answering questions on Q1 about someone who later left.
+        """
+        if not first_name:
+            return ""
+        candidates = (
+            _load_pinned_monthly("smb", 2026, 4),
+            _load_pinned_monthly("am", 2026, 4),
+            _load_pinned_smb_quarter(2026, 1),
+            _load_pinned_am_quarter(2026, 1),
+        )
+        current_yr = (period or {}).get("year")
+        current_qt = (period or {}).get("quarter")
+        current_mo = (period or {}).get("month")
+        for cand in candidates:
+            if not cand:
+                continue
+            # Skip the current period itself
+            if int(cand.get("year") or 0) == int(current_yr or 0) and (
+                int(cand.get("quarter") or 0) == int(current_qt or 0)
+                and int(cand.get("month") or 0) == int(current_mo or 0)
+            ):
+                continue
+            for rr in (cand.get("reps") or []):
+                rname = (rr.get("name") or "").strip().lower()
+                if rname.startswith(first_name) and rr.get("left_org"):
+                    mo_word = ""
+                    try:
+                        mo_word = (cand.get("month_label") or "").split()[0]
+                    except Exception:
+                        mo_word = ""
+                    if mo_word:
+                        return f"Additionally, {first_name.title()} left the organization in {mo_word}, so no further payouts were processed afterward."
+                    return f"Additionally, {first_name.title()} later left the organization, so no further payouts were processed afterward."
+        return ""
 
     def _format_manager_answer() -> str:
         return (
@@ -2066,9 +2971,1357 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
             f"- Base commission: {_usd(mgr_summary.get('base_usd') or 0)}\n"
             f"- Pending commissions (carry-over from prior periods): +{_usd(mgr_summary.get('pending_total_usd') or 0)}\n"
             f"- Clawbacks: −{_usd(mgr_summary.get('clawback_total_usd') or 0)}\n"
-            f"- **Final payout: {_usd(mgr_summary.get('final_payout_usd') or 0)} (≈ {_inr(mgr_summary.get('final_payout_usd') or 0)})**"
-            + (f"\n\n_{mgr_summary.get('calculation_note')}_" if mgr_summary.get("calculation_note") else "")
+            f"- **Final payout: {_usd_with_inr(mgr_summary.get('final_payout_usd') or 0)}**"
+            + (f"\n\n_{_esc_md(mgr_summary.get('calculation_note'))}_" if mgr_summary.get("calculation_note") else "")
         )
+
+    # ------------------------------------------------------------------
+    # ENT-specific intent handlers (Q1 ENT page suggested prompts)
+    # ------------------------------------------------------------------
+    # These take priority over the generic per-rep / manager narrative because
+    # the Enterprise team uses different language (slab bands, Payment Received
+    # vs booked revenue, Not-Paid deal exclusion, Q4 pending + Cambrex clawback).
+    team_label_low = ((pinned.get("manager_incentive") or {}).get("team_label") or "").lower()
+    unpaid_overrides = pinned.get("unpaid_deals_overrides") or []
+    paid_deals_block = pinned.get("paid_deals") or []
+    mgr_pending_block = (pinned.get("manager_incentive") or {}).get("pending_commissions") or []
+    mgr_clawback_block = (pinned.get("manager_incentive") or {}).get("clawbacks") or []
+    # ENT-specific gate: must be tied to the Enterprise team (or Anthony as sole rep).
+    # The AM page now also has paid_deals / unpaid_deals_overrides, so we can't use those
+    # alone to decide — that would mis-route AM questions to the ENT handlers.
+    is_ent_period = ("enterprise" in team_label_low) or (
+        bool(summary.get("manager_is_also_a_rep")) and (
+            mgr_name_low.startswith("anthony") or "anthony" in mgr_name_low
+        )
+    )
+
+    def _ent_unpaid_deals_answer() -> str:
+        """Answer questions about 'Not Paid' Q1 deals and how they're excluded from Payment Received."""
+        if not unpaid_overrides:
+            return f"No 'Not Paid' deal exclusions are recorded for {period_lbl}."
+        booked_total = float(pinned.get("team_achievement_usd") or summary.get("team", {}).get("achievement_raw_usd") or 0)
+        paid_total = float(pinned.get("team_payment_received_usd") or summary.get("team", {}).get("payment_received_effective_usd") or 0)
+        unpaid_total = sum(float(u.get("amount_usd") or 0) for u in unpaid_overrides)
+        paid_deals_total = sum(float(p.get("amount_usd") or 0) for p in paid_deals_block)
+        _paid_count_q = len(paid_deals_block)
+        _unpaid_count_q = len(unpaid_overrides)
+        _closed_count_q = _paid_count_q + _unpaid_count_q
+        out: list[str] = [
+            f"### {period_lbl} — Q1 deals marked **Not Paid** (excluded from Payment Received)",
+            "",
+            f"**Deal counts:** {_closed_count_q} deals closed in total — "
+            f"**{_paid_count_q}** with payment received ({_usd(paid_deals_total)}), "
+            f"**{_unpaid_count_q}** with payment not yet received ({_usd(unpaid_total)}).",
+            "",
+            f"These {_unpaid_count_q} Q1 deals were marked **Not Paid** in HubSpot at the time the Q1 commission was calculated. "
+            "Per ENT policy, commission is calculated on **Payment Received**, not booked revenue — so these deals are "
+            "excluded from the commission base until payment arrives.",
+            "",
+            "| Deal | Close date | Amount |",
+            "| --- | --- | --- |",
+        ]
+        for u in unpaid_overrides:
+            dn = _esc_md((u.get("deal_name") or "").strip() or "(unnamed deal)")
+            cd = _esc_md((u.get("close_date") or "").strip() or "—")
+            amt = float(u.get("amount_usd") or 0)
+            out.append(f"| **{dn}** | {cd} | {_usd(amt)} |")
+        out.append("")
+        out.append(f"**Total unpaid: {_usd(unpaid_total)}**")
+        out.append("")
+        # If we have the paid-deal detail, show it for symmetry.
+        if paid_deals_block:
+            out.append(f"### Paid Q1 deals (included in Payment Received)")
+            out.append("")
+            out.append("| Deal | Close date | Amount |")
+            out.append("| --- | --- | --- |")
+            for p in paid_deals_block:
+                dn = _esc_md((p.get("deal_name") or "").strip() or "(unnamed deal)")
+                cd = _esc_md((p.get("close_date") or "").strip() or "—")
+                amt = float(p.get("amount_usd") or 0)
+                out.append(f"| **{dn}** | {cd} | {_usd(amt)} |")
+            out.append("")
+            out.append(f"**Total paid: {_usd(paid_deals_total)}**")
+            out.append("")
+        out.append("**How the exclusion works**")
+        out.append(f"- Booked revenue (HubSpot total): {_usd(booked_total)}")
+        if paid_deals_block:
+            out.append(f"- = Paid Q1 deals (Payment Received): {_usd(paid_deals_total)}")
+        out.append(f"- Minus Not-Paid deals: −{_usd(unpaid_total)}")
+        out.append(f"- **= Payment Received: {_usd(paid_total)}**")
+        out.append("")
+        # Find the ENT rep / slab rate from the commission block
+        ent_reps = ((pinned.get("commission") or {}).get("reps") or [])
+        if ent_reps:
+            r0 = ent_reps[0]
+            slab_pct = float(r0.get("slab_pct") or 0)
+            base = float(r0.get("base_commission_usd") or 0)
+            person = (r0.get("name") or "Anthony").split()[0]
+            out.append(
+                f"Anthony's base commission is therefore **{_usd(paid_total)} × {slab_pct:g}% = {_usd(base)}** — "
+                f"not {_usd(booked_total)} × {slab_pct:g}%. Once payment arrives for any of the Not-Paid deals, the "
+                f"corresponding commission will be released in a future cycle."
+            )
+        else:
+            out.append(
+                "Anthony's Q1 base commission is calculated on the Payment Received amount above at the ENT slab rate."
+            )
+        return "\n".join(out)
+
+    def _ent_refund_clawback_answer() -> str:
+        """Answer questions about the Cambrex refund / clawback."""
+        if not mgr_clawback_block:
+            return f"No refunds or clawbacks are recorded for {period_lbl}."
+        out: list[str] = [
+            f"### {period_lbl} — Refund / clawback breakdown",
+            "",
+        ]
+        cb_total = 0.0
+        for cb in mgr_clawback_block:
+            lbl = _esc_md((cb.get("label") or cb.get("deal_name") or "").strip() or "(unnamed deal)")
+            per = _esc_md((cb.get("period") or "").strip())
+            refund_amt = float(cb.get("deal_amount_usd") or 0)
+            rate = float(cb.get("rate_pct") or 0)
+            ded = float(cb.get("deduction_usd") or 0)
+            note = _esc_md((cb.get("note") or "").strip())
+            cb_total += ded
+            out.append(f"**{lbl}** ({per})")
+            out.append(f"- Original deal amount refunded: {_usd(refund_amt)}")
+            out.append(f"- Commission previously paid at the Q4 rate: {refund_amt:,.2f} × {rate:g}% = **{_usd(ded)}**")
+            out.append(f"- This amount is **clawed back** (deducted from {period_lbl}'s payout).")
+            if note:
+                out.append(f"  _{note}_")
+            out.append("")
+        if len(mgr_clawback_block) > 1:
+            out.append(f"**Total clawback: −{_usd(cb_total)}**")
+            out.append("")
+        # Show how it flows into Anthony's total
+        ent_reps = ((pinned.get("commission") or {}).get("reps") or [])
+        if ent_reps:
+            r0 = ent_reps[0]
+            base = float(r0.get("base_commission_usd") or 0)
+            pending_total = float((pinned.get("manager_incentive") or {}).get("total_pending_commission_usd") or 0)
+            final = float((pinned.get("manager_incentive") or {}).get("final_payout_usd") or float(r0.get("total_payout_usd") or 0))
+            person = (r0.get("name") or "Anthony").split()[0]
+            out.append("**How it flows into the final payout**")
+            out.append(
+                f"- {person}'s Q1 base: {_usd(base)} + Q4 pending: +{_usd(pending_total)} − clawback: −{_usd(cb_total)} "
+                f"= **{_usd(final)}**"
+            )
+        return "\n".join(out)
+
+    def _ent_anthony_total_answer() -> str:
+        """Answer 'What is Anthony's total Q1 payout, including Q4 pending deals?' — full breakdown."""
+        ent_reps = ((pinned.get("commission") or {}).get("reps") or [])
+        if not ent_reps:
+            return f"No commission entries are recorded for {period_lbl}."
+        r0 = ent_reps[0]
+        nm = (r0.get("name") or "Anthony Raymond").strip()
+        quota = float(r0.get("quota_usd") or 0)
+        rev = float(r0.get("revenue_achieved_usd") or 0)
+        paid = float(r0.get("payment_received_usd") or 0)
+        ach_pct = float(r0.get("eligible_pct") or 0)
+        slab_pct = float(r0.get("slab_pct") or 0)
+        base = float(r0.get("base_commission_usd") or 0)
+        unpaid_total = sum(float(u.get("amount_usd") or 0) for u in unpaid_overrides)
+        pending_total = float((pinned.get("manager_incentive") or {}).get("total_pending_commission_usd") or 0)
+        clawback_total = float((pinned.get("manager_incentive") or {}).get("total_clawback_usd") or 0)
+        final = float((pinned.get("manager_incentive") or {}).get("final_payout_usd") or float(r0.get("total_payout_usd") or 0))
+
+        _paid_count_a = len(paid_deals_block)
+        _unpaid_count_a = len(unpaid_overrides)
+        _closed_count_a = _paid_count_a + _unpaid_count_a
+        out: list[str] = [
+            f"### {nm} — {period_lbl} total payout: **{_usd(final)}**",
+            "",
+            "**Performance**",
+            f"- Quota: {_usd(quota)}",
+            f"- Revenue achieved (booked): {_usd(rev)} ({ach_pct:.1f}% of quota)",
+        ]
+        if _closed_count_a > 0:
+            out.append(
+                f"- Deals closed: **{_closed_count_a}** total — "
+                f"**{_paid_count_a}** paid, **{_unpaid_count_a}** not paid"
+            )
+        out.extend([
+            f"- Payment received (after excluding {_unpaid_count_a} Not-Paid deals totaling {_usd(unpaid_total)}): **{_usd(paid)}**",
+            "",
+            "**Base commission**",
+            f"- Achievement of {ach_pct:.1f}% lands in the **0–75.99% ENT slab band → {slab_pct:g}%** commission rate.",
+            f"- Commission is calculated on **Payment Received**, not booked revenue:",
+            f"  - {_usd(paid)} × {slab_pct:g}% = **{_usd(base)}**",
+            "",
+        ])
+        if mgr_pending_block:
+            out.append("**Q4 pending commissions (paid in Q1)**")
+            for p in mgr_pending_block:
+                dn = _esc_md((p.get("deal_name") or "").strip())
+                per = _esc_md((p.get("period") or "").strip())
+                deal_amt = float(p.get("deal_amount_usd") or 0)
+                rate = float(p.get("rate_pct") or 0)
+                comm = float(p.get("commission_usd") or 0)
+                out.append(f"- **{dn}** ({per}) — {_usd(deal_amt)} × {rate:g}% = **+{_usd(comm)}**")
+            out.append(f"  **Subtotal: +{_usd(pending_total)}**")
+            out.append("")
+        if mgr_clawback_block:
+            out.append("**Refunds / clawbacks**")
+            for cb in mgr_clawback_block:
+                lbl = _esc_md((cb.get("label") or cb.get("deal_name") or "").strip())
+                per = _esc_md((cb.get("period") or "").strip())
+                refund_amt = float(cb.get("deal_amount_usd") or 0)
+                rate = float(cb.get("rate_pct") or 0)
+                ded = float(cb.get("deduction_usd") or 0)
+                out.append(f"- **{lbl}** ({per}) — {_usd(refund_amt)} × {rate:g}% = **−{_usd(ded)}**")
+            out.append(f"  **Subtotal: −{_usd(clawback_total)}**")
+            out.append("")
+        out.append("**Final math**")
+        out.append(
+            f"- Q1 base {_usd(base)} + Q4 pending +{_usd(pending_total)} − clawback −{_usd(clawback_total)} = **{_usd(final)}**"
+        )
+        return "\n".join(out)
+
+    def _ent_step_by_step_answer() -> str:
+        """Numbered, policy-aware walkthrough of the full ENT commission calculation.
+
+        Used for prompts like "Explain the ENT commission calculation step by step",
+        "Walk me through the calculation", "How was the commission calculated", etc.
+        """
+        ent_reps = ((pinned.get("commission") or {}).get("reps") or [])
+        if not ent_reps:
+            return f"No ENT commission entries are recorded for {period_lbl}."
+        r0 = ent_reps[0]
+        nm = (r0.get("name") or "Anthony Raymond").strip()
+        quota = float(r0.get("quota_usd") or 0)
+        booked = float(r0.get("revenue_achieved_usd") or 0)
+        paid = float(r0.get("payment_received_usd") or 0)
+        ach_pct = float(r0.get("eligible_pct") or 0)
+        slab_pct = float(r0.get("slab_pct") or 0)
+        base = float(r0.get("base_commission_usd") or 0)
+        unpaid_total = sum(float(u.get("amount_usd") or 0) for u in unpaid_overrides)
+        pending_total = float((pinned.get("manager_incentive") or {}).get("total_pending_commission_usd") or 0)
+        clawback_total = float((pinned.get("manager_incentive") or {}).get("total_clawback_usd") or 0)
+        final = float(
+            (pinned.get("manager_incentive") or {}).get("final_payout_usd")
+            or float(r0.get("total_payout_usd") or 0)
+        )
+
+        _paid_count_s = len(paid_deals_block)
+        _unpaid_count_s = len(unpaid_overrides)
+        _closed_count_s = _paid_count_s + _unpaid_count_s
+        out: list[str] = [
+            f"## {period_lbl} — ENT commission calculation, step by step",
+            "",
+            f"This is exactly how {nm}'s **{_usd(final)}** total payout is built from the policy and the deal data.",
+            "",
+            "---",
+            "",
+            "### Step 1 — Pull the team's Q1 performance from HubSpot",
+            "",
+            f"- **Quota** (Q1 ENT target): {_usd(quota)}",
+            f"- **Revenue achieved (booked)**: {_usd(booked)}  →  **{ach_pct:.1f}% of quota**",
+        ]
+        if _closed_count_s > 0:
+            out.append(
+                f"- **Deal counts**: {_closed_count_s} deals closed total — "
+                f"**{_paid_count_s}** with payment received, **{_unpaid_count_s}** with payment not received."
+            )
+        out.extend([
+            "",
+            "These are the raw deal totals closed in the quarter. They aren't the commission base yet — "
+            "we still need to subtract any deals that weren't actually paid by the close of the commission cycle.",
+            "",
+            "---",
+            "",
+            "### Step 2 — Exclude Q1 deals that were Not Paid",
+            "",
+            "ENT policy: **commission is calculated on Payment Received, not booked revenue.** "
+            "Any deal still marked Not Paid in HubSpot at the time the commission is run is excluded from the base.",
+            "",
+        ])
+        if unpaid_overrides:
+            out.append("**Not-Paid deals (excluded):**")
+            out.append("")
+            out.append("| Deal | Close date | Amount |")
+            out.append("| --- | --- | --- |")
+            for u in unpaid_overrides:
+                dn = _esc_md((u.get("deal_name") or "").strip() or "(unnamed deal)")
+                cd = _esc_md((u.get("close_date") or "").strip() or "—")
+                amt = float(u.get("amount_usd") or 0)
+                out.append(f"| **{dn}** | {cd} | {_usd(amt)} |")
+            out.append("")
+            out.append(f"**Total Not-Paid: {_usd(unpaid_total)}**")
+            out.append("")
+            if paid_deals_block:
+                paid_deals_total = sum(float(p.get("amount_usd") or 0) for p in paid_deals_block)
+                out.append("**Paid Q1 deals (included in Payment Received):**")
+                out.append("")
+                out.append("| Deal | Close date | Amount |")
+                out.append("| --- | --- | --- |")
+                for p in paid_deals_block:
+                    dn = _esc_md((p.get("deal_name") or "").strip() or "(unnamed deal)")
+                    cd = _esc_md((p.get("close_date") or "").strip() or "—")
+                    amt = float(p.get("amount_usd") or 0)
+                    out.append(f"| **{dn}** | {cd} | {_usd(amt)} |")
+                out.append("")
+                out.append(f"**Total Paid: {_usd(paid_deals_total)}**")
+                out.append("")
+            out.append("Math:")
+            out.append("```")
+            out.append(f"Booked          {booked:>14,.2f}")
+            out.append(f"− Not Paid      {unpaid_total:>14,.2f}")
+            out.append(f"────────────────────────────────")
+            out.append(f"Payment Received{paid:>14,.2f}")
+            out.append("```")
+        else:
+            out.append(f"No Not-Paid exclusions for {period_lbl}. Payment Received = Booked = {_usd(paid)}.")
+        out.append("")
+        out.append("---")
+        out.append("")
+        out.append("### Step 3 — Determine the slab band from achievement %")
+        out.append("")
+        out.append("ENT slab bands (achievement vs quota → commission rate):")
+        out.append("")
+        out.append("| Achievement | Commission rate |")
+        out.append("| --- | --- |")
+        out.append("| 0 – 75.99% | **7%** |")
+        out.append("| 76 – 100% | 9% |")
+        out.append("| 101 – 125% | 11% |")
+        out.append("| 126%+ | 13% |")
+        out.append("")
+        out.append(
+            f"At **{ach_pct:.1f}% of quota**, {nm.split()[0]} lands in the **0 – 75.99%** band → "
+            f"**{slab_pct:g}%** commission rate."
+        )
+        out.append("")
+        out.append(
+            "Note: ENT has a **0% eligibility floor** — any positive revenue qualifies, "
+            "so there's no \"below the floor → $0 commission\" outcome like SMB/AM."
+        )
+        out.append("")
+        out.append("---")
+        out.append("")
+        out.append("### Step 4 — Calculate Q1 base commission")
+        out.append("")
+        out.append("```")
+        out.append(f"Base = Payment Received × Slab %")
+        out.append(f"     = {paid:,.2f} × {slab_pct:g}%")
+        out.append(f"     = {base:,.2f}")
+        out.append("```")
+        out.append("")
+        out.append(
+            f"**Q1 base commission: {_usd(base)}**  "
+            f"(Note: we use Payment Received {_usd(paid)}, NOT booked revenue {_usd(booked)}.)"
+        )
+        out.append("")
+        out.append("---")
+        out.append("")
+        # Step 5 — Q4 pending
+        if mgr_pending_block:
+            out.append("### Step 5 — Add Q4 pending commissions (paid in Q1 at the Q4 rate)")
+            out.append("")
+            out.append(
+                "These are deals that closed in Q4 FY2025 but whose payment was actually received during Q1. "
+                "Per policy, the commission is paid at the **Q4 rate (10%)**, not the current Q1 rate."
+            )
+            out.append("")
+            out.append("| Deal | Period | Paid amount | Q4 rate | Commission |")
+            out.append("| --- | --- | --- | --- | --- |")
+            for p in mgr_pending_block:
+                dn = _esc_md((p.get("deal_name") or "").strip())
+                per = _esc_md((p.get("period") or "").strip())
+                deal_amt = float(p.get("deal_amount_usd") or 0)
+                rate = float(p.get("rate_pct") or 0)
+                comm = float(p.get("commission_usd") or 0)
+                out.append(f"| **{dn}** | {per} | {_usd(deal_amt)} | {rate:g}% | **+{_usd(comm)}** |")
+            out.append("")
+            out.append(f"**Subtotal pending: +{_usd(pending_total)}**")
+            out.append("")
+            out.append("---")
+            out.append("")
+        # Step 6 — Clawbacks
+        if mgr_clawback_block:
+            out.append("### Step 6 — Deduct Q4 refunds / clawbacks")
+            out.append("")
+            out.append(
+                "If a Q4 deal that previously paid out commission is later cancelled and refunded, "
+                "that earlier commission is **clawed back** from the current quarter's payout — "
+                "again at the **original Q4 rate (10%)**."
+            )
+            out.append("")
+            out.append("| Refund / cancelled deal | Period | Refund amount | Q4 rate | Clawback |")
+            out.append("| --- | --- | --- | --- | --- |")
+            for cb in mgr_clawback_block:
+                lbl = _esc_md((cb.get("label") or cb.get("deal_name") or "").strip())
+                per = _esc_md((cb.get("period") or "").strip())
+                refund_amt = float(cb.get("deal_amount_usd") or 0)
+                rate = float(cb.get("rate_pct") or 0)
+                ded = float(cb.get("deduction_usd") or 0)
+                out.append(f"| **{lbl}** | {per} | {_usd(refund_amt)} | {rate:g}% | **−{_usd(ded)}** |")
+            out.append("")
+            out.append(f"**Subtotal clawback: −{_usd(clawback_total)}**")
+            out.append("")
+            out.append("---")
+            out.append("")
+        # Step 7 — Final
+        step_n = 7 if (mgr_pending_block and mgr_clawback_block) else (6 if (mgr_pending_block or mgr_clawback_block) else 5)
+        out.append(f"### Step {step_n} — Add it all up")
+        out.append("")
+        out.append("```")
+        out.append(f"Q1 base                {base:>12,.2f}")
+        if mgr_pending_block:
+            out.append(f"+ Q4 pending           {pending_total:>12,.2f}")
+        if mgr_clawback_block:
+            out.append(f"− Q4 clawback          {clawback_total:>12,.2f}")
+        out.append(f"───────────────────────────────────")
+        out.append(f"Final {period_lbl} payout {final:>12,.2f}")
+        out.append("```")
+        out.append("")
+        out.append(f"### ✅ Final Q1 FY2026 payout: **{_usd(final)}**")
+        out.append("")
+        out.append(
+            "_Note: ENT is paid in **USD only** — no INR conversion is applied._"
+        )
+        return "\n".join(out)
+
+    if is_ent_period:
+        # Step-by-step calculation walkthrough — highest priority because it overlaps
+        # with other ENT triggers (it also contains the word "commission").
+        if any(
+            t in q for t in (
+                "step by step", "step-by-step", "step by-step",
+                "walk me through", "walkthrough", "walk through",
+                "explain the calculation", "explain calculation",
+                "explain the ent", "explain ent",
+                "explain the commission", "explain commission",
+                "how is the commission calculated", "how was the commission calculated",
+                "how is the ent commission", "how the commission",
+                "in detail", "detailed breakdown", "detailed explanation",
+                "show me the math", "show the math", "show the calculation",
+            )
+        ):
+            return _ent_step_by_step_answer()
+        # Q1: "Anthony's total Q1 FY2026 payout, including Q4 pending deals" — full breakdown.
+        if ("anthony" in q) and any(
+            t in q for t in ("total", "payout", "commission", "earn", "pending", "including", "summariz", "summary", "breakdown", "bullet")
+        ):
+            return _ent_anthony_total_answer()
+        # Q2: "Which Q1 deals were Not Paid? How are they excluded from Payment Received?"
+        # Also catches "paid deals" / "deals we received payment for" — the unpaid-deals
+        # answer now shows both paid and unpaid for symmetry.
+        if any(
+            t in q for t in (
+                "not paid", "not-paid", "unpaid", "non-paid", "non paid",
+                "excluded from payment", "exclude from payment", "exclusion",
+                "payment received", "received the payment", "received payment",
+                "paid deals", "paid q1 deals", "paid deal list",
+                "estée lauder", "estee lauder", "experian", "cloudsoft",
+                "ezcater", "bunsow", "nfl - slack", "deel - spo", "tracelink",
+                "marketcast", "convex insurance", "cumulus global",
+            )
+        ):
+            return _ent_unpaid_deals_answer()
+        # Q3: "What is the Cambrex refund and how is it deducted?"
+        if any(
+            t in q for t in (
+                "cambrex", "refund", "refunded", "cancelled deal", "canceled deal",
+                "cancellation", "cancelled", "canceled", "clawed back",
+            )
+        ):
+            return _ent_refund_clawback_answer()
+
+    # ------------------------------------------------------------------
+    # SMB-specific intent handlers (Q1 SMB page suggested prompts)
+    # ------------------------------------------------------------------
+    # The SMB page has 7 commissioned reps + Chitradip as manager, 44 deals (with 1
+    # Keytel cancellation), and 3 Q4 clawbacks. Scoped strictly to SMB.
+    is_smb_period = ("smb" in team_label_low or team_label_low.startswith("smb")) and not is_ent_period and not (
+        "account management" in team_label_low or "account mgmt" in team_label_low
+    )
+
+    def _smb_deal_counts_answer() -> str:
+        """SMB Q1 deal counts: total / paid / not paid / cancelled with breakdown."""
+        if not (paid_deals_block or unpaid_overrides):
+            return f"No SMB deal-level data recorded for {period_lbl}."
+        cancelled = [d for d in unpaid_overrides if d.get("is_cancelled")]
+        non_cancelled_unpaid = [d for d in unpaid_overrides if not d.get("is_cancelled") and not d.get("is_partial_remainder")]
+        paid_n = len(paid_deals_block)
+        unpaid_n = len(non_cancelled_unpaid)
+        cancelled_n = len(cancelled)
+        total = paid_n + unpaid_n  # effective (cancelled deals don't count)
+        paid_sum = sum(float(d.get("amount_usd") or 0) for d in paid_deals_block)
+        unpaid_sum = sum(float(d.get("amount_usd") or 0) for d in non_cancelled_unpaid)
+        cancelled_sum = sum(float(d.get("amount_usd") or 0) for d in cancelled)
+        official_team_paid = float((pinned.get("manager_incentive") or {}).get("team_payment_received_usd") or paid_sum)
+        official_team_booked = float(pinned.get("team_achievement_usd") or (paid_sum + unpaid_sum))
+
+        out = [
+            f"### {period_lbl} — SMB team deal counts",
+            "",
+            f"- 📦 **Total effective deals closed**: **{total}** (paid + not received; cancellations excluded)",
+            f"- ✅ **Payment received**: **{paid_n} deal(s)** — total **{_usd(official_team_paid)}** (official)",
+            f"- ❌ **Payment not received**: **{unpaid_n} deal(s)** — excluded value **{_usd(unpaid_sum)}**",
+        ]
+        if cancelled_n:
+            out.append(f"- ⚠️ **Cancelled (was Closed Won, later cancelled)**: **{cancelled_n} deal(s)** — {_usd(cancelled_sum)} removed from team achievement")
+        out.append("")
+        out.append("**Team-level summary**")
+        out.append(f"- Booked Amount (after cancellations): **{_usd(official_team_booked)}**")
+        out.append(f"- Payment Received: **{_usd(official_team_paid)}**")
+        out.append(f"- Pending: **{_usd(unpaid_sum)}**")
+        if cancelled_n:
+            out.append("")
+            out.append("**Cancelled deals**")
+            for d in cancelled:
+                dn = _esc_md((d.get("deal_name") or "").strip())
+                owner = _esc_md((d.get("deal_owner") or "").strip())
+                amt = float(d.get("amount_usd") or 0)
+                out.append(f"- **{dn}** — Owner: {owner} · {_usd(amt)}")
+        return "\n".join(out)
+
+    def _smb_deal_owner_answer() -> str:
+        """SMB Q1 deal-owner breakdown using official rep figures for Booked and Received."""
+        if not (paid_deals_block or unpaid_overrides):
+            return f"No SMB deal-owner data recorded for {period_lbl} AM."
+        # Build rep lookup
+        rep_lookup = {(r.get("name") or "").strip().lower(): r for r in (pinned.get("reps") or [])}
+        owner_alias = {"yogesh vig": "yogi"}
+
+        owners: dict[str, dict] = {}
+        for d in paid_deals_block:
+            o = owners.setdefault(d.get("deal_owner") or "—", {"paid_n": 0, "unpaid_n": 0, "cancelled_n": 0, "booked_deal": 0.0, "paid_deal": 0.0, "pending_deal": 0.0, "cancelled_sum": 0.0})
+            o["paid_n"] += 1
+            o["paid_deal"] += float(d.get("amount_usd") or 0)
+            o["booked_deal"] += float(d.get("amount_usd") or 0)
+        for d in unpaid_overrides:
+            o = owners.setdefault(d.get("deal_owner") or "—", {"paid_n": 0, "unpaid_n": 0, "cancelled_n": 0, "booked_deal": 0.0, "paid_deal": 0.0, "pending_deal": 0.0, "cancelled_sum": 0.0})
+            amt = float(d.get("amount_usd") or 0)
+            if d.get("is_cancelled"):
+                o["cancelled_n"] += 1
+                o["cancelled_sum"] += amt
+            else:
+                o["unpaid_n"] += 1
+                o["booked_deal"] += amt
+                o["pending_deal"] += amt
+
+        out = [
+            f"### {period_lbl} — SMB deals by owner",
+            "",
+            "_Booked Amount and $ Payment received use the **official rep totals** from the JSON (rounded to whole dollars). $ Pending sums from the deal-level data._",
+            "",
+            "| Deal Owner | Total | Payment received | # Payment not received | Booked Amount | $ Payment received | $ Payment Pending |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        sum_total = sum_paid = sum_unpaid = 0
+        sum_pending = 0.0
+        for owner, o in sorted(owners.items(), key=lambda kv: (-(kv[1]["paid_n"] + kv[1]["unpaid_n"]), kv[0])):
+            tot = o["paid_n"] + o["unpaid_n"]
+            # Look up rep by normalized name (strip "(Deactivated User)" and apply aliases)
+            base_name = (owner or "").replace(" (Deactivated User)", "").strip().lower()
+            base_name = owner_alias.get(base_name, base_name)
+            rep = rep_lookup.get(base_name)
+            if rep:
+                booked_disp = round(float(rep.get("achievement_usd") or 0))
+                paid_disp = float(rep.get("payment_received_usd") or 0)
+            else:
+                booked_disp = o["booked_deal"]
+                paid_disp = o["paid_deal"]
+            sum_total += tot
+            sum_paid += o["paid_n"]
+            sum_unpaid += o["unpaid_n"]
+            sum_pending += o["pending_deal"]
+            out.append(
+                f"| **{_esc_md(owner)}** | {tot} | {o['paid_n']} | {o['unpaid_n']} | "
+                f"{_usd(booked_disp)} | {_usd(paid_disp)} | {_usd(o['pending_deal'])} |"
+            )
+        official_total_booked = float(pinned.get("team_achievement_usd") or 0)
+        official_total_paid = float((pinned.get("manager_incentive") or {}).get("team_payment_received_usd") or 0)
+        out.append(
+            f"| **Total (SMB team)** | **{sum_total}** | **{sum_paid}** | **{sum_unpaid}** | "
+            f"**{_usd(official_total_booked)}** | **{_usd(official_total_paid)}** | **{_usd(sum_pending)}** |"
+        )
+        return "\n".join(out)
+
+    def _smb_keytel_cancellation_answer() -> str:
+        """Explain the Keytel Systems cancellation and its impact on Yogi & team."""
+        # Find the cancelled deal (if any)
+        cancelled = [d for d in unpaid_overrides if d.get("is_cancelled")]
+        if not cancelled:
+            return f"No cancelled deals recorded for {period_lbl} SMB."
+        out = [f"### {period_lbl} — Cancelled deals and their impact", ""]
+        team_booked = float(pinned.get("team_achievement_usd") or 0)
+        for d in cancelled:
+            dn = _esc_md((d.get("deal_name") or "").strip())
+            owner_raw = (d.get("deal_owner") or "").strip()
+            owner = _esc_md(owner_raw)
+            amt = float(d.get("amount_usd") or 0)
+            cd = _esc_md((d.get("close_date") or "").strip())
+            status = _esc_md((d.get("payment_status") or "Cancelled").strip())
+            reason = _esc_md((d.get("reason") or "").strip())
+            pre_cancel_team = team_booked + amt
+            out.append(f"**{dn}**")
+            out.append(f"- **Owner**: {owner}")
+            out.append(f"- **Amount**: {_usd(amt)}")
+            out.append(f"- **Status**: {status} (Closed Won on {cd})")
+            if reason:
+                out.append(f"- _{reason}_")
+            out.append("")
+            out.append("**Impact on the team**")
+            out.append(f"- Original Q1 Booked Amount (with the deal): {_usd(pre_cancel_team)}")
+            out.append(f"- After cancellation: **{_usd(team_booked)}** (= {_usd(pre_cancel_team)} − {_usd(amt)})")
+            # Identify the affected rep
+            base_owner = owner_raw.replace(" (Deactivated User)", "").strip().lower()
+            owner_alias = {"yogesh vig": "yogi"}
+            base_owner = owner_alias.get(base_owner, base_owner)
+            rep_lookup = {(r.get("name") or "").strip().lower(): r for r in (pinned.get("reps") or [])}
+            rep = rep_lookup.get(base_owner)
+            if rep:
+                rep_name = (rep.get("name") or "").strip()
+                rep_ach = float(rep.get("achievement_usd") or 0)
+                rep_pre = rep_ach + amt
+                quota = float(rep.get("target_usd") or 0)
+                pre_pct = (rep_pre / quota * 100.0) if quota else 0.0
+                post_pct = (rep_ach / quota * 100.0) if quota else 0.0
+                out.append(f"- **{rep_name}'s individual achievement** drops from {_usd(rep_pre)} ({pre_pct:.1f}% of quota) to **{_usd(rep_ach)}** ({post_pct:.1f}% of quota).")
+            out.append("")
+        out.append(
+            "_Cancellations remove the deal value from the team Booked Amount, the rep's individual achievement, "
+            "and the bullet chart percentage. Payment Received is unaffected because no money was ever collected._"
+        )
+        return "\n".join(out)
+
+    def _smb_chitradip_manager_stepbystep_answer() -> str:
+        """Detailed step-by-step walkthrough of Chitradip's SMB manager commission."""
+        mgr = pinned.get("manager_incentive") or {}
+        team_target = float(mgr.get("team_target_usd") or pinned.get("team_target_usd") or 0)
+        team_ach = float(mgr.get("team_achievement_usd") or pinned.get("team_achievement_usd") or 0)
+        team_ach_pct = float(mgr.get("team_achievement_pct") or 0) or (
+            (team_ach / team_target * 100.0) if team_target else 0.0
+        )
+        team_paid = float(mgr.get("team_payment_received_usd") or 0)
+        rate_pct = float(mgr.get("commission_rate_pct") or 1.5)
+        mgr_q1 = float(mgr.get("manager_q1_amount_usd") or 0) or round(team_paid * rate_pct / 100.0, 2)
+        clawback_total = float(mgr.get("total_clawback_usd") or 0)
+        final = float(mgr.get("final_payout_usd") or (mgr_q1 - clawback_total))
+        clawback_items = mgr.get("clawbacks") or []
+        elig_min = int((pinned.get("commission") or {}).get("eligibility_min_pct") or 50)
+
+        out = [
+            f"## {period_lbl} — Chitradip's SMB Manager Commission, Step by Step",
+            "",
+            f"Chitradip is the SMB manager. His Q1 commission is calculated on the team's **Payment Received** at a flat "
+            f"**{rate_pct:g}%** manager rate, then reduced by Q4 clawback adjustments.",
+            "",
+            "---",
+            "",
+            "### Step 1 — Pull the team's Q1 performance",
+            "",
+            f"- **Team target**: {_usd(team_target)}",
+            f"- **Team achievement (booked, after Keytel cancellation)**: {_usd(team_ach)} → **{team_ach_pct:.0f}% of quota**",
+            f"- **Team payment received** (commission base): **{_usd(team_paid)}**",
+            "",
+            "---",
+            "",
+            "### Step 2 — Determine the manager rate",
+            "",
+            f"SMB manager rate: **{rate_pct:g}% of team payment received** (flat — no slab tiers for the manager).",
+            f"Team is at **{team_ach_pct:.0f}%** of quota, which is above the {elig_min}% floor → Chitradip is eligible for the base.",
+            "",
+            "---",
+            "",
+            "### Step 3 — Calculate Q1 base manager commission",
+            "",
+            "```",
+            f"Base = Team Payment Received × {rate_pct:g}%",
+            f"     = {team_paid:,.2f} × {rate_pct:g}%",
+            f"     = {mgr_q1:,.2f}",
+            "```",
+            "",
+            f"**Q1 base commission: {_usd(mgr_q1)}**",
+            "",
+            "---",
+            "",
+        ]
+        if clawback_items:
+            out.append("### Step 4 — Apply Q4 clawback adjustments")
+            out.append("")
+            out.append(
+                "Each clawback is a prior-period adjustment that reduces Chitradip's current quarter commission. "
+                "Reasons vary — deals that were counted but never collected, or slab over-payments that need correction."
+            )
+            out.append("")
+            out.append("| Clawback | Deal amount | Rate | Deduction |")
+            out.append("| --- | ---: | ---: | ---: |")
+            for cb in clawback_items:
+                lbl = _esc_md((cb.get("label") or cb.get("deal_name") or "").strip())
+                deal_amt = float(cb.get("deal_amount_usd") or 0)
+                rate = float(cb.get("rate_pct") or 0)
+                ded = float(cb.get("deduction_usd") or 0)
+                note = _esc_md((cb.get("note") or "").strip())
+                out.append(f"| **{lbl}** | {_usd(deal_amt)} | {rate:g}% | **−{_usd(ded)}** |")
+                if note:
+                    out.append(f"| _{note}_ |  |  |  |")
+            out.append("")
+            out.append(f"**Subtotal clawback: −{_usd(clawback_total)}**")
+            out.append("")
+            out.append("---")
+            out.append("")
+        out.append("### Step 5 — Add it all up")
+        out.append("")
+        out.append("```")
+        out.append(f"Q1 base                {mgr_q1:>12,.2f}")
+        if clawback_items:
+            out.append(f"− Q4 clawbacks         {clawback_total:>12,.2f}")
+        out.append(f"───────────────────────────────────")
+        out.append(f"Final Q1 payout        {final:>12,.2f}")
+        out.append("```")
+        out.append("")
+        out.append(f"### ✅ Final {period_lbl} payout: **{_usd(final)}** (≈ {_inr(final)})")
+        return "\n".join(out)
+
+    if is_smb_period:
+        # SMB-0: Chitradip manager step-by-step
+        if (
+            ("chitradip" in q and any(t in q for t in (
+                "step by step", "step-by-step", "walk through", "walkthrough",
+                "manager commission", "manager's commission", "manager incentive",
+                "explain", "calculation", "in detail", "clawback", "clawbacks",
+            )))
+            or "noventiq" in q
+            or "synergy employment" in q
+            or "ceg solutions" in q
+            or "yieldstreet" in q
+            or ("3 clawback" in q or "three clawback" in q)
+        ):
+            return _smb_chitradip_manager_stepbystep_answer()
+        # SMB-A: deal counts
+        if any(
+            t in q for t in (
+                "how many deals", "how many deal", "deal count", "deal counts",
+                "number of deals", "number of deal", "total deals closed",
+                "deals closed", "deal closed",
+            )
+        ):
+            return _smb_deal_counts_answer()
+        # SMB-B: deal owner breakdown
+        if any(
+            t in q for t in (
+                "deal owner", "by owner", "per owner", "owner breakdown",
+                "all owners", "every owner", "each owner",
+                "break down deals", "breakdown deals", "deals by",
+            )
+        ):
+            return _smb_deal_owner_answer()
+        # SMB-C: Keytel cancellation
+        if any(t in q for t in ("keytel", "keytel systems", "cancellation", "cancelled deal", "cancelled deals", "deal cancelled")):
+            return _smb_keytel_cancellation_answer()
+
+    # ------------------------------------------------------------------
+    # AM-specific intent handlers (Q1 AM page suggested prompts)
+    # ------------------------------------------------------------------
+    # The AM page now has paid_deals / unpaid_deals_overrides arrays, plus a Joy-as-
+    # both-rep-and-manager scenario with Wipro clawback, the Artnet partial payment,
+    # and now 37 total deals across 4 deal owners. Strictly scoped to AM.
+    is_am_period = ("account management" in team_label_low or "account mgmt" in team_label_low) and not is_ent_period
+    deals_summary_pinned = pinned.get("deals_summary") or {}
+
+    def _am_deal_counts_answer() -> str:
+        """Total / paid / not paid deal counts for AM Q1."""
+        if not (paid_deals_block or unpaid_overrides):
+            return f"No deal-level data is recorded for {period_lbl} AM."
+        partial_paid = [d for d in paid_deals_block if d.get("is_partial")]
+        partial_remainder = [d for d in unpaid_overrides if d.get("is_partial_remainder")]
+        any_payment_count = len(paid_deals_block)  # includes partial-paid
+        fully_unpaid_count = sum(1 for d in unpaid_overrides if not d.get("is_partial_remainder"))
+        total_closed = int(deals_summary_pinned.get("total_deals_closed") or (
+            any_payment_count - len(partial_paid) + fully_unpaid_count + len(partial_paid)
+        ))
+        paid_sum = sum(float(d.get("amount_usd") or 0) for d in paid_deals_block)
+        unpaid_sum = sum(float(d.get("amount_usd") or 0) for d in unpaid_overrides)
+        return (
+            f"### {period_lbl} — AM team deal counts\n\n"
+            f"- 📦 **Total deals closed**: **{total_closed}**\n"
+            f"- ✅ **Payment received**: **{any_payment_count} deal(s)** — total {_usd(paid_sum)}"
+            + (f" _(includes {len(partial_paid)} partially-paid deal — Artnet)_" if partial_paid else "")
+            + "\n"
+            f"- ❌ **Payment not received**: **{fully_unpaid_count} deal(s)** — excluded value {_usd(unpaid_sum)}"
+            + (f"\n  _(the Artnet partial remainder of ${(partial_remainder[0].get('amount_usd') or 0):,.2f} is also pending — see Artnet for details)_" if partial_remainder else "")
+            + "\n\n"
+            f"Per ENT-style policy on Payment Received, only deals with payment received contribute to the commission base. "
+            f"The {fully_unpaid_count} Not-Paid deal(s) plus the partial Artnet remainder are excluded until payment arrives."
+        )
+
+    def _am_deal_owner_answer() -> str:
+        """Deal-owner breakdown for AM Q1 — same columns as the page table:
+        Deal Owner | Total | Payment received deals | # Payment not received | Booked Amount | $ Received | $ Pending."""
+        if not (paid_deals_block or unpaid_overrides):
+            return f"No deal-owner data recorded for {period_lbl} AM."
+        owners: dict[str, dict] = {}
+        for d in paid_deals_block:
+            o = owners.setdefault(d.get("deal_owner") or "—", {
+                "paid_n": 0, "unpaid_n": 0, "partial_paid_n": 0, "partial_unpaid_n": 0,
+                "booked": 0.0, "paid_usd": 0.0, "pending_usd": 0.0,
+            })
+            o["paid_n"] += 1
+            paid_amt = float(d.get("amount_usd") or 0)
+            o["paid_usd"] += paid_amt
+            is_partial = bool(d.get("is_partial"))
+            total_v = float(d.get("total_deal_value_usd") or 0) if is_partial else paid_amt
+            o["booked"] += total_v if is_partial else paid_amt
+            if is_partial:
+                o["partial_paid_n"] += 1
+                o["pending_usd"] += max(total_v - paid_amt, 0)
+        for d in unpaid_overrides:
+            o = owners.setdefault(d.get("deal_owner") or "—", {
+                "paid_n": 0, "unpaid_n": 0, "partial_paid_n": 0, "partial_unpaid_n": 0,
+                "booked": 0.0, "paid_usd": 0.0, "pending_usd": 0.0,
+            })
+            amt = float(d.get("amount_usd") or 0)
+            if d.get("is_partial_remainder"):
+                # Don't double-count booked/pending — already added on the paid side
+                o["partial_unpaid_n"] += 1
+            else:
+                o["unpaid_n"] += 1
+                o["booked"] += amt
+                o["pending_usd"] += amt
+
+        out: list[str] = [
+            f"### {period_lbl} — AM deals by owner",
+            "",
+            "| Deal Owner | Total | Payment received deals | # Payment not received | Booked Amount | $ Payment received | $ Payment Pending |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        sum_total = sum_paid = sum_unpaid = 0
+        sum_partial_paid = sum_partial_unpaid = 0
+        sum_booked = sum_paid_usd = sum_pending_usd = 0.0
+        for owner, o in sorted(owners.items(), key=lambda kv: -(kv[1]["paid_n"] + kv[1]["unpaid_n"])):
+            tot = o["paid_n"] + o["unpaid_n"]
+            paid_cell = f"{o['paid_n']}" + (f" ({o['partial_paid_n']}-Partial Paid)" if o["partial_paid_n"] else "")
+            unpaid_cell = f"{o['unpaid_n']}" + (f" ({o['partial_unpaid_n']}-Partial Payment not received)" if o["partial_unpaid_n"] else "")
+            out.append(
+                f"| **{_esc_md(owner)}** | {tot} | {paid_cell} | {unpaid_cell} | "
+                f"{_usd(o['booked'])} | {_usd(o['paid_usd'])} | {_usd(o['pending_usd'])} |"
+            )
+            sum_total += tot
+            sum_paid += o["paid_n"]
+            sum_unpaid += o["unpaid_n"]
+            sum_partial_paid += o["partial_paid_n"]
+            sum_partial_unpaid += o["partial_unpaid_n"]
+            sum_booked += o["booked"]
+            sum_paid_usd += o["paid_usd"]
+            sum_pending_usd += o["pending_usd"]
+        total_paid_cell = f"**{sum_paid}**" + (f" ({sum_partial_paid}-Partial Paid)" if sum_partial_paid else "")
+        total_unpaid_cell = f"**{sum_unpaid}**" + (f" ({sum_partial_unpaid}-Partial Payment not received)" if sum_partial_unpaid else "")
+        out.append(
+            f"| **Total (AM team)** | **{sum_total}** | {total_paid_cell} | {total_unpaid_cell} | "
+            f"**{_usd(sum_booked)}** | **{_usd(sum_paid_usd)}** | **{_usd(sum_pending_usd)}** |"
+        )
+        out.append("")
+        out.append(
+            "_Note: each deal is counted once. Artnet is shown on the paid side as Partial Paid (paid portion in $ Received), "
+            "with the unpaid remainder rolled into $ Pending._"
+        )
+        return "\n".join(out)
+
+    def _am_rep_level_answer() -> str:
+        """Rep-level pending vs received money, broken down per owner."""
+        if not (paid_deals_block or unpaid_overrides):
+            return f"No rep-level deal data recorded for {period_lbl} AM."
+        owners: dict[str, dict] = {}
+        for d in paid_deals_block:
+            o = owners.setdefault(d.get("deal_owner") or "—", {"received": 0.0, "pending": 0.0, "paid_deal_count": 0, "unpaid_deal_count": 0})
+            o["received"] += float(d.get("amount_usd") or 0)
+            o["paid_deal_count"] += 1
+        for d in unpaid_overrides:
+            o = owners.setdefault(d.get("deal_owner") or "—", {"received": 0.0, "pending": 0.0, "paid_deal_count": 0, "unpaid_deal_count": 0})
+            o["pending"] += float(d.get("amount_usd") or 0)
+            if not d.get("is_partial_remainder"):
+                o["unpaid_deal_count"] += 1
+        out: list[str] = [
+            f"### {period_lbl} — AM rep-level: received vs pending",
+            "",
+            "| Rep | $ Payment received | $ Pending (not received) | # Paid deals | # Not paid deals |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+        total_received = total_pending = 0.0
+        total_paid_n = total_unpaid_n = 0
+        for owner, o in sorted(owners.items(), key=lambda kv: -kv[1]["received"]):
+            out.append(
+                f"| **{_esc_md(owner)}** | {_usd(o['received'])} | {_usd(o['pending'])} | "
+                f"{o['paid_deal_count']} | {o['unpaid_deal_count']} |"
+            )
+            total_received += o["received"]
+            total_pending += o["pending"]
+            total_paid_n += o["paid_deal_count"]
+            total_unpaid_n += o["unpaid_deal_count"]
+        out.append(
+            f"| **Total (AM team)** | **{_usd(total_received)}** | **{_usd(total_pending)}** | "
+            f"**{total_paid_n}** | **{total_unpaid_n}** |"
+        )
+        out.append("")
+        out.append(
+            "_Note: $ Pending includes any Artnet partial-remainder amount, even though that's the same deal counted on the paid side._"
+        )
+        return "\n".join(out)
+
+    def _am_unpaid_deals_answer() -> str:
+        """List Not Paid AM deals with the partial-payment detail for Artnet."""
+        if not unpaid_overrides:
+            return f"No Not-Paid AM deals recorded for {period_lbl}."
+        out: list[str] = [
+            f"### {period_lbl} — AM deals with payment not received",
+            "",
+            "These deals are excluded from the Payment Received commission base until payment arrives:",
+            "",
+            "| Deal | Owner | Close date | Status | Amount |",
+            "| --- | --- | --- | --- | ---: |",
+        ]
+        unpaid_total = 0.0
+        for d in unpaid_overrides:
+            dn = _esc_md((d.get("deal_name") or "").strip())
+            owner = _esc_md((d.get("deal_owner") or "").strip())
+            cd = _esc_md((d.get("close_date") or "").strip())
+            status = _esc_md((d.get("payment_status") or "Not Paid").strip())
+            amt = float(d.get("amount_usd") or 0)
+            unpaid_total += amt
+            out.append(f"| **{dn}** | {owner} | {cd} | {status} | {_usd(amt)} |")
+        out.append("")
+        out.append(f"**Total excluded value: {_usd(unpaid_total)}**")
+        # If we have Artnet partial-paid, show the partial details
+        artnet_paid = next((d for d in paid_deals_block if d.get("is_partial")), None)
+        artnet_remainder = next((d for d in unpaid_overrides if d.get("is_partial_remainder")), None)
+        if artnet_paid and artnet_remainder:
+            total_val = float(artnet_paid.get("total_deal_value_usd") or 0) or (
+                float(artnet_paid.get("amount_usd") or 0) + float(artnet_remainder.get("amount_usd") or 0)
+            )
+            out.append("")
+            out.append(f"**Artnet partial-payment detail**")
+            out.append(f"- Total deal value: {_usd(total_val)}")
+            out.append(f"- Paid portion (in Payment Received): {_usd(artnet_paid.get('amount_usd') or 0)}")
+            out.append(f"- Pending portion (unpaid remainder): {_usd(artnet_remainder.get('amount_usd') or 0)}")
+        return "\n".join(out)
+
+    def _am_joy_manager_stepbystep_answer() -> str:
+        """Detailed step-by-step walkthrough of Joy's AM manager commission.
+
+        Includes performance, base commission, Krish Services Group pending commission,
+        and the Wipro Q4 clawback. Always shows the final = −$78 with carry-forward note.
+        """
+        mgr = pinned.get("manager_incentive") or {}
+        team_target = float(mgr.get("team_target_usd") or pinned.get("team_target_usd") or 0)
+        team_ach = float(mgr.get("team_achievement_usd") or pinned.get("team_achievement_usd") or 0)
+        team_ach_pct = float(mgr.get("team_achievement_pct") or 0) or (
+            (team_ach / team_target * 100.0) if team_target else 0.0
+        )
+        team_paid = float(mgr.get("team_payment_received_usd") or 0)
+        rate_pct = float(mgr.get("commission_rate_pct") or 1.5)
+        manager_q1 = float(mgr.get("manager_q1_amount_usd") or 0) or round(team_paid * rate_pct / 100.0, 2)
+        pending_total = float(mgr.get("total_pending_commission_usd") or 0)
+        clawback_total = float(mgr.get("total_clawback_usd") or 0)
+        q1_gross = float(mgr.get("q1_gross_commission_usd") or 0) or (manager_q1 + pending_total)
+        final = float(mgr.get("final_payout_usd"))  # locked at −78
+        carry = float(mgr.get("carry_forward_usd") or 0)
+        mgr_name = (mgr.get("manager_name") or "Joy").strip()
+        pending_items = mgr.get("pending_commissions") or []
+        clawback_items = mgr.get("clawbacks") or []
+        elig_min = int((pinned.get("commission") or {}).get("eligibility_min_pct") or 50)
+
+        out: list[str] = [
+            f"## {period_lbl} — {mgr_name}'s Manager Commission, Step by Step",
+            "",
+            f"{mgr_name} is **both a rep AND the AM manager** for the Account Management team. Her entire Q1 commission flows through the "
+            "`manager_incentive` block in the pinned JSON (not as a regular rep entry under `commission.reps`). Below is exactly how her "
+            f"**{_usd(final)}** Q1 result is built.",
+            "",
+            "---",
+            "",
+            "### Step 1 — Pull the team's Q1 performance",
+            "",
+            f"- **Team target**: {_usd(team_target)}",
+            f"- **Team achievement (booked)**: {_usd(team_ach)} → **{team_ach_pct:.0f}% of quota**",
+            f"- **Team payment received**: {_usd(team_paid)} (after excluding 4 Not-Paid deals + Artnet partial remainder)",
+            "",
+            f"Eligibility floor for manager base commission is **{elig_min}%** of team target. At **{team_ach_pct:.0f}%**, Joy IS eligible for the base.",
+            "",
+            "---",
+            "",
+            "### Step 2 — Calculate Q1 base manager commission",
+            "",
+            f"AM manager incentive policy: **{rate_pct:g}% of team payment received**.",
+            "",
+            "```",
+            f"Base = Team Payment Received × {rate_pct:g}%",
+            f"     = {team_paid:,.2f} × {rate_pct:g}%",
+            f"     = {manager_q1:,.2f}",
+            "```",
+            "",
+            f"**Q1 base commission: {_usd(manager_q1)}**",
+            "",
+            "---",
+            "",
+        ]
+        # Step 3 — Q4 pending (Krish Services Group)
+        if pending_items:
+            out.append("### Step 3 — Add Q4 pending commissions (paid in Q1 at the Q4 rate)")
+            out.append("")
+            out.append(
+                "These are deals that closed in Q4 FY2025 but whose payment was received in Q1. Per policy they're paid at the "
+                "**Q4 rate (1%)**, not the current Q1 rate."
+            )
+            out.append("")
+            out.append("| Deal | Period | Deal amount | Q4 rate | Commission |")
+            out.append("| --- | --- | ---: | ---: | ---: |")
+            for p in pending_items:
+                dn = _esc_md((p.get("deal_name") or "").strip())
+                per = _esc_md((p.get("period") or "").strip())
+                deal_amt = float(p.get("deal_amount_usd") or 0)
+                rate = float(p.get("rate_pct") or 0)
+                comm = float(p.get("commission_usd") or 0)
+                out.append(f"| **{dn}** | {per} | {_usd(deal_amt)} | {rate:g}% | **+{_usd(comm)}** |")
+            out.append("")
+            out.append(f"**Subtotal pending: +{_usd(pending_total)}**")
+            out.append("")
+            out.append(f"Q1 gross commission so far: Base {_usd(manager_q1)} + Pending {_usd(pending_total)} = **{_usd(q1_gross)}**.")
+            out.append("")
+            out.append("---")
+            out.append("")
+        # Step 4 — Wipro clawback
+        if clawback_items:
+            out.append("### Step 4 — Apply the Q4 Wipro slab-adjustment clawback")
+            out.append("")
+            out.append(
+                "The Wipro Q4 FY2025 deal was processed at a **4% slab** at the time of payout, but the correct slab is **1%**. "
+                "The 3% over-payment is clawed back from Q1's manager commission."
+            )
+            out.append("")
+            out.append("| Refund / adjustment | Period | Deal amount | Rate adjustment | Clawback |")
+            out.append("| --- | --- | ---: | ---: | ---: |")
+            for cb in clawback_items:
+                lbl = _esc_md((cb.get("label") or cb.get("deal_name") or "").strip())
+                per = _esc_md((cb.get("period") or "").strip())
+                refund_amt = float(cb.get("deal_amount_usd") or 0)
+                rate = float(cb.get("rate_pct") or 0)
+                ded = float(cb.get("deduction_usd") or 0)
+                out.append(f"| **{lbl}** | {per} | {_usd(refund_amt)} | {rate:g}% | **−{_usd(ded)}** |")
+            out.append("")
+            out.append(f"**Subtotal clawback: −{_usd(clawback_total)}**")
+            out.append("")
+            out.append("---")
+            out.append("")
+        # Final
+        out.append("### Step 5 — Add it all up")
+        out.append("")
+        out.append("```")
+        out.append(f"Q1 base                  {manager_q1:>12,.2f}")
+        if pending_items:
+            out.append(f"+ Q4 pending (Krish)     {pending_total:>12,.2f}")
+        if clawback_items:
+            out.append(f"− Q4 Wipro clawback      {clawback_total:>12,.2f}")
+        out.append(f"─────────────────────────────────────")
+        out.append(f"Final {period_lbl} payout   {final:>12,.2f}")
+        out.append("```")
+        out.append("")
+        if final < 0:
+            out.append(
+                f"### ⚠️ Final Q1 FY2026 payout: **{_usd(final)}**"
+            )
+            out.append("")
+            out.append(
+                f"**No payout for Q1.** The **{_usd(final)}** balance carries forward to the next compensation cycle "
+                f"({_usd(carry)} if locked in `carry_forward_usd`). Joy doesn't owe anything — the deficit just rolls "
+                "into the next quarter's starting balance and is absorbed once new manager commission accrues."
+            )
+        else:
+            out.append(f"### ✅ Final Q1 FY2026 payout: **{_usd(final)}** (≈ {_inr(final)})")
+        return "\n".join(out)
+
+    def _am_rep_detail_answer(rep_first_name: str) -> str:
+        """Detailed per-rep Q1 commission answer.
+
+        Covers performance vs quota, eligibility check, base commission math, the 10%
+        deduction policy, any manage-deal incentive (e.g. Vivin's Q4 Vendasta CF), and
+        the rep's specific paid + unpaid deal lists. Strictly scoped to one rep — never
+        shows other reps' numbers.
+        """
+        comm_reps = (pinned.get("commission") or {}).get("reps") or []
+        rep_top_list = pinned.get("reps") or []
+        ded_pct_team = float((pinned.get("commission") or {}).get("team_deduction_pct") or 10)
+        elig_floor = int((pinned.get("commission") or {}).get("eligibility_min_pct") or 50)
+
+        # Find rep in commission.reps (preferred — has full math) or in reps[] (top level)
+        rep = next(
+            (r for r in comm_reps if (r.get("name") or "").lower().startswith(rep_first_name.lower())),
+            None,
+        )
+        rep_top = next(
+            (r for r in rep_top_list if (r.get("name") or "").lower().startswith(rep_first_name.lower())),
+            None,
+        )
+        # Collect this rep's deals
+        rep_paid = [d for d in paid_deals_block if (d.get("deal_owner") or "").lower().startswith(rep_first_name.lower())]
+        rep_unpaid = [d for d in unpaid_overrides if (d.get("deal_owner") or "").lower().startswith(rep_first_name.lower())]
+
+        if not rep and not rep_top and not rep_paid and not rep_unpaid:
+            return f"No data found for {rep_first_name.title()} in {period_lbl} AM."
+
+        # ── Special handling for deal-owners NOT on the commissioned roster (e.g. Nikita)
+        if not rep and not rep_top and (rep_paid or rep_unpaid):
+            owner_full = (rep_paid[0].get("deal_owner") if rep_paid else rep_unpaid[0].get("deal_owner")) or rep_first_name.title()
+            paid_sum_r = sum(float(d.get("amount_usd") or 0) for d in rep_paid)
+            unpaid_sum_r = sum(float(d.get("amount_usd") or 0) for d in rep_unpaid)
+            out = [
+                f"### {owner_full} — {period_lbl} (AM team)",
+                "",
+                f"**{owner_full} is not on the Q1 commissioned AM roster** — she owns a Q1 deal in HubSpot but is not paid AM rep commission "
+                f"directly. The deal she owns still contributes to the team Booked Amount / Payment Received calculation that flows into "
+                f"Joy's manager incentive.",
+                "",
+                "**Deals owned**:",
+                "",
+                "| Deal | Close date | Status | Amount |",
+                "| --- | --- | --- | ---: |",
+            ]
+            for d in (rep_paid + rep_unpaid):
+                out.append(
+                    f"| **{_esc_md((d.get('deal_name') or '').strip())}** | "
+                    f"{_esc_md((d.get('close_date') or '').strip())} | "
+                    f"{_esc_md((d.get('payment_status') or '').strip())} | "
+                    f"{_usd(float(d.get('amount_usd') or 0))} |"
+                )
+            out.append("")
+            out.append(f"**Payment received**: {_usd(paid_sum_r)} · **Pending**: {_usd(unpaid_sum_r)}")
+            out.append("")
+            out.append(
+                f"**Personal AM commission for {period_lbl}: $0.00** (not on commissioned roster). "
+                f"Once payment arrives for any pending deal, the dollars roll into the AM team total."
+            )
+            return "\n".join(out)
+
+        # ── Standard commissioned rep flow
+        rep_name = (rep.get("name") if rep else rep_top.get("name")) or rep_first_name.title()
+        quota = float((rep or {}).get("quota_usd") or (rep_top or {}).get("target_usd") or 0)
+        booked = float((rep or {}).get("revenue_achieved_usd") or (rep_top or {}).get("achievement_usd") or 0)
+        paid_recv = float((rep or {}).get("payment_received_usd") or (rep_top or {}).get("payment_received_usd") or 0)
+        ach_pct = (booked / quota * 100.0) if quota else 0.0
+        if rep and rep.get("eligible_pct") is not None:
+            ach_pct = float(rep.get("eligible_pct") or 0)
+        base = float((rep or {}).get("base_commission_usd") or 0)
+        ded_pct = float((rep or {}).get("deduction_pct") or 0)
+        ded_amt = float((rep or {}).get("deduction_usd") or 0)
+        md_total = float((rep or {}).get("manage_deal_usd") or 0)
+        md_paid_now = float((rep or {}).get("manage_deal_paid_now_usd") or 0)
+        md_pending = max(md_total - md_paid_now, 0)
+        payout = float((rep or {}).get("total_payout_usd") or 0)
+        note_v = ((rep or {}).get("note") or "").strip()
+        eligible = ach_pct >= elig_floor
+
+        out: list[str] = [
+            f"## {rep_name} — {period_lbl} commission breakdown",
+            "",
+            f"This answer covers **{rep_name} only** — for the full team view, ask for the deal-owner breakdown.",
+            "",
+            "---",
+            "",
+            "### Step 1 — Performance vs quota",
+            "",
+            f"- **Individual quota**: {_usd(quota)}",
+            f"- **Revenue achieved (booked)**: {_usd(booked)} → **{ach_pct:.0f}% of quota**",
+            f"- **Payment received**: {_usd(paid_recv)}",
+            "",
+            "---",
+            "",
+            "### Step 2 — Eligibility check",
+            "",
+            f"AM Q1 eligibility floor: **{elig_floor}% of individual quota**.",
+            "",
+        ]
+        if eligible:
+            out.append(
+                f"{rep_name} is at **{ach_pct:.0f}%** of quota → meets the {elig_floor}% floor → **eligible** for Q1 commission. ✅"
+            )
+            out.append("")
+            out.append("---")
+            out.append("")
+            out.append("### Step 3 — Base commission (1% of Payment Received)")
+            out.append("")
+            out.append("```")
+            out.append(f"Base = Payment Received × 1%")
+            out.append(f"     = {paid_recv:,.2f} × 1%")
+            out.append(f"     = {base:,.2f}")
+            out.append("```")
+            out.append("")
+            if ded_amt > 0:
+                out.append("---")
+                out.append("")
+                out.append(f"### Step 4 — Apply the {int(ded_pct_team)}% deduction")
+                out.append("")
+                out.append(
+                    f"AM policy: reps who didn't close a Q1 manage deal incur a **{int(ded_pct)}% deduction** on their achieved commission. "
+                    f"This applies to {rep_name}."
+                )
+                out.append("")
+                out.append("```")
+                out.append(f"Deduction = Base × {int(ded_pct)}%")
+                out.append(f"          = {base:,.2f} × {int(ded_pct)}%")
+                out.append(f"          = {ded_amt:,.2f}")
+                out.append("```")
+                out.append("")
+                out.append(f"After deduction: **{_usd(base - ded_amt)}**.")
+                out.append("")
+            if md_total > 0:
+                out.append("---")
+                out.append("")
+                out.append("### Step 5 — Q4 manage deal incentive (paid in Q1)")
+                out.append("")
+                out.append(
+                    f"{rep_name} has a **Q4 FY2025 manage deal** whose payment was received in Q1 — Vendasta CloudFuze Manage Deal. "
+                    "Per policy, it's paid at the **10% manage-deal rate**."
+                )
+                out.append("")
+                out.append("```")
+                out.append(f"Manage deal incentive = Manage Deal Amount × 10%")
+                out.append(f"                      = {md_total:,.2f} × 10%")
+                out.append(f"                      = {md_paid_now:,.2f}")
+                out.append("```")
+                out.append("")
+                if md_pending > 0:
+                    out.append(f"_(Of the {_usd(md_total)} total manage deal incentive earned, only **{_usd(md_paid_now)}** is paid this cycle — the remaining {_usd(md_pending)} releases when payment arrives.)_")
+                    out.append("")
+            out.append("---")
+            out.append("")
+            out.append("### Step 6 — Add it all up")
+            out.append("")
+            out.append("```")
+            out.append(f"Base commission           {base:>12,.2f}")
+            if ded_amt > 0:
+                out.append(f"− {int(ded_pct)}% deduction            {ded_amt:>12,.2f}")
+            if md_paid_now > 0:
+                out.append(f"+ Manage deal paid now    {md_paid_now:>12,.2f}")
+            out.append(f"──────────────────────────────────────")
+            out.append(f"Final Q1 payout           {payout:>12,.2f}")
+            out.append("```")
+            out.append("")
+            out.append(f"### ✅ Final {period_lbl} payout: **{_usd(payout)}** (≈ {_inr(payout)})")
+        else:
+            out.append(
+                f"{rep_name} is at **{ach_pct:.0f}%** of quota — **below the {elig_floor}% floor**. **Not eligible** for Q1 base commission. ❌"
+            )
+            out.append("")
+            out.append("---")
+            out.append("")
+            out.append("### Step 3 — Commission result")
+            out.append("")
+            out.append(
+                f"Because {rep_name} did not meet the {elig_floor}% eligibility floor, the base commission for Q1 is **$0.00**. Her deals "
+                f"still **count toward the team's Booked Amount and Payment Received** (which flow into Joy's manager incentive), but they "
+                f"don't earn {rep_name} personal commission this quarter."
+            )
+            out.append("")
+            out.append(f"### ❌ Final {period_lbl} payout: **$0.00**")
+
+        # Show the rep's Q1 deal list at the end for full context
+        if rep_paid or rep_unpaid:
+            out.append("")
+            out.append("---")
+            out.append("")
+            out.append(f"### {rep_name}'s Q1 deals")
+            out.append("")
+            out.append("| Deal | Close date | Status | Amount |")
+            out.append("| --- | --- | --- | ---: |")
+            for d in rep_paid:
+                out.append(
+                    f"| **{_esc_md((d.get('deal_name') or '').strip())}** | "
+                    f"{_esc_md((d.get('close_date') or '').strip())} | "
+                    f"{_esc_md((d.get('payment_status') or '').strip())} | "
+                    f"{_usd(float(d.get('amount_usd') or 0))} |"
+                )
+            for d in rep_unpaid:
+                out.append(
+                    f"| **{_esc_md((d.get('deal_name') or '').strip())}** | "
+                    f"{_esc_md((d.get('close_date') or '').strip())} | "
+                    f"{_esc_md((d.get('payment_status') or '').strip())} | "
+                    f"{_usd(float(d.get('amount_usd') or 0))} |"
+                )
+            rep_paid_sum = sum(float(d.get("amount_usd") or 0) for d in rep_paid)
+            rep_unpaid_sum = sum(float(d.get("amount_usd") or 0) for d in rep_unpaid)
+            unique_deal_n = len(rep_paid) + sum(1 for d in rep_unpaid if not d.get("is_partial_remainder"))
+            out.append("")
+            out.append(
+                f"**{unique_deal_n} deal{'s' if unique_deal_n != 1 else ''}** · "
+                f"**Received**: {_usd(rep_paid_sum)} · **Pending**: {_usd(rep_unpaid_sum)}"
+            )
+
+        if note_v:
+            out.append("")
+            out.append(f"_{_esc_md(note_v)}_")
+        return "\n".join(out)
+
+    if is_am_period:
+        # AM-0 (highest priority): Joy's manager commission step-by-step.
+        # Triggers on strong signals — Wipro clawback name, or Joy + (step/manager/commission).
+        if (
+            "wipro" in q
+            or ("joy" in q and any(t in q for t in (
+                "step by step", "step-by-step", "step by-step", "walk through", "walkthrough",
+                "manager commission", "manager's commission", "manager incentive",
+                "explain", "calculation", "in detail",
+                "carry forward", "carry-forward",
+            )))
+            or "krish services" in q
+            or "mars overage" in q
+        ):
+            return _am_joy_manager_stepbystep_answer()
+
+        # AM-0.5 (also high priority): per-rep individual detail. Routes BEFORE the
+        # deal-owner-breakdown handler so questions about ONE specific rep return that
+        # rep's commission breakdown instead of the all-owners table. Multi-rep mentions
+        # (e.g. "Vivin, Joy, Arundhati and Nikita") still fall through to the breakdown.
+        rep_names_in_q = {
+            n for n in ("vivin", "arundhati", "nikita")
+            if n in q
+        }
+        # Joy is intentionally excluded here — Joy's questions go to AM-0 (manager step-by-step).
+        if len(rep_names_in_q) == 1 and "joy" not in q:
+            single = next(iter(rep_names_in_q))
+            return _am_rep_detail_answer(single)
+        # AM-A: deal counts
+        if any(
+            t in q for t in (
+                "how many deals", "how many deal", "deal count", "deal counts",
+                "number of deals", "number of deal", "total deals closed",
+                "total deal closed", "total deals", "total deal",
+                "deals closed", "deal closed",
+            )
+        ):
+            return _am_deal_counts_answer()
+        # AM-B: deal owner breakdown (multi-rep / all-owners questions only —
+        # single-rep names are handled by AM-0.5 above so they get the per-rep detail).
+        if any(
+            t in q for t in (
+                "deal owner", "by owner", "per owner", "owner breakdown",
+                "all owners", "every owner", "each owner",
+                "by rep", "per rep", "owner-level",
+                "break down deals", "breakdown deals", "deals by",
+            )
+        ) or len(rep_names_in_q) > 1:
+            return _am_deal_owner_answer()
+        # AM-C: rep-level received vs pending
+        if any(
+            t in q for t in (
+                "rep level", "rep-level", "received vs pending", "pending vs received",
+                "how much pending", "how much received", "how much we receive",
+                "received and pending", "at rep level",
+            )
+        ):
+            return _am_rep_level_answer()
+        # AM-D: list Not Paid / partial / specific AM deals
+        if any(
+            t in q for t in (
+                "not paid", "not-paid", "unpaid", "partially paid", "partial payment",
+                "artnet", "estée lauder", "estee lauder", "church & dwight", "church and dwight",
+                "allied gold", "nerdstogo", "nerds to go", "carolina contracting",
+                "which am deals", "am unpaid deals",
+            )
+        ):
+            return _am_unpaid_deals_answer()
 
     # Manager-specific question (highest priority — handles "Joy", "Chitradip" by name)
     if mgr_name_low and mgr_name_low in q:
@@ -2082,30 +4335,171 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
             # If this rep is the manager (e.g. Joy is both rep & manager), return the manager view.
             if rs.get("is_manager"):
                 return _format_manager_answer()
+
             payout_row = next((rp for rp in rep_payouts_list if (rp.get("name") or "").lower() == nm.lower()), None)
-            payout_str = ""
-            if payout_row:
-                payout_usd = float(payout_row.get("total_payout_usd") or 0)
-                payout_str = (
-                    f"\n- **Total payout this period**: {_usd(payout_usd)} (≈ {_inr(payout_usd)})"
-                )
-            return (
-                f"**{nm} — {period_lbl}**\n"
-                f"- Quota: {_usd(rs.get('quota_usd') or 0)}\n"
-                f"- Achievement: {_usd(rs.get('achievement_usd') or 0)} ({rs.get('achievement_pct'):.0f}%)\n"
-                f"- Payment received: {_usd(rs.get('payment_received_usd') or 0)}\n"
-                f"- Status: {rs.get('status')}"
-                f"{payout_str}"
+            # Build a rich, narrative explanation that covers:
+            # (Note: when inr_rate=0 (e.g. ENT page), _usd_with_inr falls back to USD-only.)
+            #  - eligibility (incl. policy floor)
+            #  - base commission math
+            #  - manage deal breakdown (incl. partial-paid scenarios — e.g. Lawrence's 2 deals / 1 paid)
+            #  - adjustments / prior-period items
+            #  - cross-period context (e.g. left_org later)
+            quota_v = float((payout_row or {}).get("quota_usd") or rs.get("quota_usd") or 0)
+            ach_v = float((payout_row or {}).get("revenue_achieved_usd") or rs.get("achievement_usd") or 0)
+            paid_v = float((payout_row or {}).get("payment_received_usd") or rs.get("payment_received_usd") or 0)
+            elig_pct_v = float((payout_row or {}).get("achievement_pct") or rs.get("achievement_pct") or 0)
+            base_v = float((payout_row or {}).get("base_commission_usd") or 0)
+            ded_v = float((payout_row or {}).get("deduction_usd") or 0)
+            md_v = float((payout_row or {}).get("manage_deal_usd") or 0)
+            md_paid_now_v = float((payout_row or {}).get("manage_deal_paid_now_usd") or 0)
+            md_pending_v = max(md_v - md_paid_now_v, 0)
+            payout_usd = float((payout_row or {}).get("total_payout_usd") or 0)
+            note_v = ((payout_row or {}).get("note") or "").strip()
+            adjustments = (payout_row or {}).get("adjustments_details") or []
+
+            elig_floor = float(team_summary.get("eligibility_floor_pct") or 50)
+            eligible_v = elig_pct_v >= elig_floor
+
+            lines: list[str] = [
+                f"### Why did {nm} receive {_usd_with_inr(payout_usd)} in {period_lbl}?",
+                "",
+                f"**Performance**",
+                f"- Quota: {_usd(quota_v)}",
+                f"- Revenue achieved: {_usd(ach_v)} ({elig_pct_v:.0f}%)",
+                f"- Payment received: {_usd(paid_v)}",
+                "",
+                f"**Regular commission**",
+            ]
+            is_monthly = bool(period.get("month"))
+            strict_floor_note = (
+                f" The April monthly plan applies a **strict {int(elig_floor)}% floor** — "
+                f"anything below {int(elig_floor)}% (even 59.9%) earns 0% commission."
+                if is_monthly and int(elig_floor) == 60
+                else ""
             )
+            if eligible_v:
+                lines.append(
+                    f"- {nm} is at **{elig_pct_v:.0f}%** of quota, which meets the **{int(elig_floor)}% eligibility floor**. "
+                    f"Base commission: **{_usd(base_v)}**."
+                )
+            else:
+                lines.append(
+                    f"- Achievement is **{elig_pct_v:.0f}%** of quota, **below the {int(elig_floor)}% eligibility floor**. "
+                    f"{nm} is therefore **not eligible** for regular commission this period. Base commission: **{_usd(0)}**."
+                    + strict_floor_note
+                )
+            if ded_v > 0:
+                lines.append(f"- 10% deduction applied: **−{_usd(ded_v)}**.")
+
+            # Manage deal breakdown (handles the Lawrence 2-deals / 1-paid case)
+            if md_v > 0 or md_paid_now_v > 0:
+                lines.append("")
+                lines.append("**Manage deals**")
+                if md_v > 0 and md_paid_now_v > 0 and md_v != md_paid_now_v:
+                    deals_count = int(round(md_v / 500)) if md_v else 0
+                    paid_count = int(round(md_paid_now_v / 500)) if md_paid_now_v else 0
+                    lines.append(
+                        f"- {nm} closed **{deals_count} manage deal(s)** at $500 each → **{_usd(md_v)} earned total**."
+                    )
+                    lines.append(
+                        f"- However, at the time {period_lbl} commissions were calculated, payment had been received "
+                        f"for only **{paid_count}** of those deals. So **{_usd(md_paid_now_v)}** was paid this cycle."
+                    )
+                    lines.append(
+                        f"- The remaining **{_usd(md_pending_v)}** is **pending next cycle** (payment for the other deal not yet received)."
+                    )
+                else:
+                    lines.append(f"- Manage deal incentive: **{_usd(md_v)}**.")
+                lines.append(
+                    "- Note: Manage Deal Incentive is paid regardless of overall quota achievement — "
+                    "it has its own eligibility separate from the regular commission floor."
+                )
+
+            # Adjustments (prior-period rep-level items, e.g. Yieldstreet)
+            if adjustments:
+                lines.append("")
+                lines.append("**Prior-period adjustments**")
+                for a in adjustments:
+                    deal = _esc_md((a.get("deal_name") or "").strip() or "(unnamed deal)")
+                    per = _esc_md((a.get("period") or "").strip())
+                    amt = float(a.get("commission_usd") or 0)
+                    sign = "+" if amt >= 0 else "−"
+                    deal_amt = float(a.get("paid_amount_usd") or a.get("deal_amount_usd") or 0)
+                    rate = float(a.get("rate_pct") or 0)
+                    math_part = f" *({deal_amt:,.2f} × {rate:g}%)*" if (deal_amt and rate) else ""
+                    lines.append(
+                        f"- **{deal}** "
+                        + (f"({per}) " if per else "")
+                        + f"— {sign}{_usd(abs(amt))}{math_part}"
+                    )
+
+            # If this rep IS the manager (e.g. Anthony for ENT), also surface the
+            # manager-level pending commissions and clawbacks since they belong to them.
+            rep_is_manager_role = (nm.lower() == (mgr_summary.get("manager_name") or "").lower()) and (mgr_summary.get("manager_name") or "")
+            mgr_pending_items = (pinned.get("manager_incentive") or {}).get("pending_commissions") or []
+            mgr_clawbacks_items = (pinned.get("manager_incentive") or {}).get("clawbacks") or []
+            if rep_is_manager_role and (mgr_pending_items or mgr_clawbacks_items):
+                if mgr_pending_items:
+                    lines.append("")
+                    lines.append("**Q4 pending commissions (paid in this period)**")
+                    for p in mgr_pending_items:
+                        dn = _esc_md((p.get("deal_name") or "").strip())
+                        per = _esc_md((p.get("period") or "").strip())
+                        deal_amt = float(p.get("deal_amount_usd") or 0)
+                        rate = float(p.get("rate_pct") or 0)
+                        comm = float(p.get("commission_usd") or 0)
+                        lines.append(
+                            f"- **{dn}** ({per}) — {_usd(deal_amt)} × {rate:g}% = **+{_usd(comm)}**"
+                        )
+                    lines.append(f"  **Subtotal: +{_usd(float(mgr_summary.get('pending_total_usd') or 0))}**")
+                if mgr_clawbacks_items:
+                    lines.append("")
+                    lines.append("**Refunds / clawbacks**")
+                    for cb in mgr_clawbacks_items:
+                        lbl = _esc_md((cb.get("label") or "").strip())
+                        per = _esc_md((cb.get("period") or "").strip())
+                        deal_amt = float(cb.get("deal_amount_usd") or 0)
+                        rate = float(cb.get("rate_pct") or 0)
+                        ded = float(cb.get("deduction_usd") or 0)
+                        lines.append(
+                            f"- **{lbl}** ({per}) — {_usd(deal_amt)} × {rate:g}% = **−{_usd(ded)}**"
+                        )
+                    lines.append(f"  **Subtotal: −{_usd(float(mgr_summary.get('clawback_total_usd') or 0))}**")
+
+            # Final result
+            lines.append("")
+            lines.append(f"**Final payout for {period_lbl}: {_usd_with_inr(payout_usd)}**")
+
+            # JSON note (if present) often has the authoritative narrative
+            if note_v:
+                lines.append("")
+                lines.append(f"_{_esc_md(note_v)}_")
+
+            # Cross-period context (e.g. left org in April)
+            cross_note = _cross_period_note_for_rep(first)
+            if cross_note:
+                lines.append("")
+                lines.append(cross_note)
+
+            return "\n".join(lines)
 
     # Aggregate questions
     team_summary = summary.get("team") or {}
+    mgr_is_rep = bool(summary.get("manager_is_also_a_rep"))
     if any(t in q for t in ("total payout", "total commission", "grand total", "team payout", "team commission", "all payouts")):
+        if mgr_is_rep:
+            # When the only "manager" is also a rep (e.g. ENT / Anthony), the rep payout
+            # already includes the manager-level pending commissions and clawbacks. Showing
+            # a separate "Manager final payout" line would double-count and confuse readers.
+            return (
+                f"**{period_lbl} — total payout**\n"
+                f"- **Total payout: {_usd_with_inr(summary['grand_total']['payout_usd'])}**"
+            )
         return (
             f"**{period_lbl} — total payout**\n"
             f"- Rep payouts (sum): {_usd(summary['rep_payouts_totals']['sum_total_payout_usd'])}\n"
             f"- Manager final payout: {_usd(mgr_summary.get('final_payout_usd') or 0)}\n"
-            f"- **Grand total: {_usd(summary['grand_total']['payout_usd'])} (≈ {_inr(summary['grand_total']['payout_usd'])})**"
+            f"- **Grand total: {_usd_with_inr(summary['grand_total']['payout_usd'])}**"
         )
 
     if any(t in q for t in ("team achievement", "team target", "team performance", "team total", "achievement", "achieved")):
@@ -2117,58 +4511,90 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
             f"- Payment received: {_usd(team_summary.get('payment_received_effective_usd') or 0)}"
         )
 
-    # Clawback / deduction questions
-    if any(t in q for t in ("clawback", "claw back", "deduction reason", "why deducted")):
-        clawbacks = (pinned.get("manager_incentive") or {}).get("clawbacks") or []
-        if not clawbacks:
-            return f"No clawbacks were applied in {period_lbl}."
-        lines = []
-        for cb in clawbacks:
-            lbl = (cb.get("label") or "").strip()
-            ded = float(cb.get("deduction_usd") or 0)
-            note = (cb.get("note") or "").strip()
-            lines.append(f"- **{lbl}** — −{_usd(ded)}\n  _{note}_")
-        return (
-            f"**{period_lbl} — clawbacks (total −{_usd(mgr_summary.get('clawback_total_usd') or 0)})**\n\n"
-            + "\n".join(lines)
-        )
-
-    # Pending commission questions
-    if any(t in q for t in ("pending", "carry over", "carry-over", "prior period", "prior-period", "additional payout")):
-        pending = (pinned.get("manager_incentive") or {}).get("pending_commissions") or []
-        if not pending:
-            return f"No pending prior-period commissions in {period_lbl}."
-        lines = []
-        for p in pending:
-            dn = (p.get("deal_name") or "").strip()
-            per = (p.get("period") or "").strip()
-            comm = float(p.get("commission_usd") or 0)
-            lines.append(f"- **{dn}** ({per}) — +{_usd(comm)}")
-        return (
-            f"**{period_lbl} — pending commissions (total +{_usd(mgr_summary.get('pending_total_usd') or 0)})**\n\n"
-            + "\n".join(lines)
-        )
-
-    # Exception questions
-    if any(t in q for t in ("exception", "washington post", "server split", "sow")):
-        excs = summary.get("exceptions") or []
-        if not excs:
-            return f"No exceptions applied in {period_lbl}."
-        lines = []
-        for ex in excs:
-            lines.append(
-                f"- **{ex.get('deal_name')}** → {ex.get('rep')} — share +{_usd(ex.get('share_usd') or 0)}\n"
-                f"  _{ex.get('note')}_"
+    # Comprehensive: clawbacks, adjustments, exceptions, pending commissions, prior-period items.
+    # Users often use these terms interchangeably — surface everything when any of them is asked.
+    prior_keywords = (
+        "clawback", "claw back",
+        "exception", "exceptions",
+        "pending", "carry over", "carry-over", "carry forward", "carry-forward",
+        "adjustment", "adjustments",
+        "prior period", "prior-period",
+        "deduction reason", "why deducted",
+        "additional payout",
+        # specific deal names users have referenced
+        "willow", "wealth", "wipro", "noventiq", "krish", "vendasta", "yieldstreet",
+        "soules", "legal soft", "washington post",
+    )
+    if any(t in q for t in prior_keywords):
+        all_items = summary.get("all_prior_period_items") or []
+        if not all_items:
+            return (
+                f"No clawbacks, adjustments, exceptions, or pending commissions were applied in "
+                f"{period_lbl} for this team."
             )
-        return (
-            f"**{period_lbl} — exceptions (total +{_usd(team_summary.get('total_exception_usd') or 0)} added to team)**\n\n"
-            + "\n".join(lines)
-        )
+
+        # Group by kind for a clean breakdown.
+        grouped: dict[str, list[dict]] = {}
+        for it in all_items:
+            grouped.setdefault(it.get("kind", "Other"), []).append(it)
+
+        order = [
+            "Manager clawback",
+            "Manager pending commission",
+            "Rep adjustment",
+            "Team exception",
+        ]
+        kind_labels = {
+            "Manager clawback": "Manager clawbacks (deductions from prior-period adjustments)",
+            "Manager pending commission": "Manager pending commissions (paid in this period from prior-period deals)",
+            "Rep adjustment": "Rep-level adjustments (e.g. prior-quarter deal commissions credited this month)",
+            "Team exception": "Team exceptions (e.g. server splits / SOW carve-outs added to team total)",
+        }
+
+        out: list[str] = [f"**{period_lbl} — prior-period adjustments overview**", ""]
+        net_total = 0.0
+        for kind in order:
+            items = grouped.get(kind) or []
+            if not items:
+                continue
+            out.append(f"### {kind_labels.get(kind, kind)}")
+            sub_total = 0.0
+            for it in items:
+                amt = float(it.get("amount_usd") or 0)
+                sub_total += amt
+                deal = _esc_md((it.get("deal_name") or "").strip() or "(unnamed deal)")
+                person = _esc_md((it.get("rep_or_manager") or "").strip())
+                per = _esc_md((it.get("period") or "").strip())
+                deal_amt = float(it.get("deal_amount_usd") or 0)
+                rate = float(it.get("rate_pct") or 0)
+                sign = "+" if amt >= 0 else "−"
+                math_str = ""
+                if deal_amt and rate:
+                    math_str = f" *(\\${deal_amt:,.2f} × {rate:g}%)*"
+                note = _esc_md((it.get("note") or "").strip())
+                out.append(
+                    f"- **{deal}** "
+                    + (f"→ {person} " if person else "")
+                    + (f"({per}) " if per else "")
+                    + f"— {sign}{_usd(abs(amt))}{math_str}"
+                    + (f"\n  _{note}_" if note else "")
+                )
+            net_total += sub_total
+            out.append(f"  **Subtotal: {'+' if sub_total >= 0 else '−'}{_usd(abs(sub_total))}**")
+            out.append("")
+
+        out.append(f"**Net impact on this period's payouts: {'+' if net_total >= 0 else '−'}{_usd(abs(net_total))}**")
+        return "\n".join(out)
 
     # INR conversion questions
     if any(t in q for t in ("inr", "rupee", "rupees", "₹", "indian")):
         if not inr_rate:
             return "No INR exchange rate set in this pinned period."
+        if mgr_is_rep:
+            return (
+                f"**{period_lbl} — payouts in INR @ ₹{inr_rate:g}/USD**\n"
+                f"- **Total payout: {_inr(summary['grand_total']['payout_usd'])}**"
+            )
         return (
             f"**{period_lbl} — payouts in INR @ ₹{inr_rate:g}/USD**\n"
             f"- Rep payouts (sum): {_inr(summary['rep_payouts_totals']['sum_total_payout_usd'])}\n"
@@ -2180,7 +4606,20 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
     if any(t in q for t in ("eligible", "eligibility", "qualif")):
         not_elig = [rs for rs in rep_status_list if "not eligible" in (rs.get("status") or "").lower() or "left org" in (rs.get("status") or "").lower()]
         eligible = [rs for rs in rep_status_list if rs not in not_elig and not rs.get("is_manager")]
+        is_monthly = bool(period.get("month"))
+        elig_floor = int(team_summary.get("eligibility_floor_pct") or 50)
         lines = []
+        # Lead with the policy rule so the answer is unambiguous.
+        if is_monthly and elig_floor == 60:
+            lines.append(
+                f"**Eligibility rule for {period_lbl}:** Sales reps must achieve a minimum of **{elig_floor}%** of their individual quota to qualify for commission. "
+                f"Anyone below {elig_floor}% — even **59.9%** — earns **0%** commission."
+            )
+        else:
+            lines.append(
+                f"**Eligibility rule for {period_lbl}:** Sales reps must achieve a minimum of **{elig_floor}%** of their individual quota to qualify for commission."
+            )
+        lines.append("")
         if eligible:
             lines.append("**Eligible reps:**")
             for rs in eligible:
@@ -2206,6 +4645,17 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
         return f"**{period_lbl} — rep payouts**\n" + "\n".join(lines)
 
     # Default: brief overview
+    if mgr_is_rep:
+        # ENT (Anthony) case: only one person, who is both rep and manager. The rep payout
+        # already includes pending/clawback adjustments, so don't show a separate manager line.
+        return (
+            f"**{period_lbl} — quick overview**\n"
+            f"- Team target: {_usd(team_summary.get('target_usd') or 0)}\n"
+            f"- Team achievement: {_usd(team_summary.get('achievement_effective_usd') or 0)} ({team_summary.get('achievement_pct'):.1f}%)\n"
+            f"- **Total payout: {_usd(summary['grand_total']['payout_usd'])}**\n\n"
+            "Try asking: \"total payout\", \"why is the commission this amount\", "
+            "\"pending commissions\", \"clawbacks\", or \"unpaid deals\"."
+        )
     return (
         f"**{period_lbl} — quick overview**\n"
         f"- Team target: {_usd(team_summary.get('target_usd') or 0)}\n"
@@ -3083,6 +5533,14 @@ def _compute_pinned_summary(pinned: dict) -> dict:
             md_amt_v = round(md_v * md_pct_only_am / 100.0, 2) if (is_am_team and md_v > 0 and eligible_v) else 0.0
             adj_total_v = round(sum(float(a.get("commission_usd") or 0) for a in (r.get("adjustments") or [])), 2)
             payout_v = round(base_v + md_amt_v + adj_total_v, 2)
+            # Honour per-rep override (e.g. Yogi's $1,004 rounded total) so the chat assistant
+            # stays in sync with the UI table.
+            _override = r.get("total_payout_override_usd")
+            if _override is not None:
+                try:
+                    payout_v = round(float(_override), 2)
+                except (TypeError, ValueError):
+                    pass
 
             sum_base += base_v
             sum_manage += md_amt_v
@@ -3104,6 +5562,7 @@ def _compute_pinned_summary(pinned: dict) -> dict:
                     "base_commission_usd": base_v,
                     "manage_deal_usd": md_amt_v,
                     "adjustments_usd": adj_total_v,
+                    "adjustments_details": list(r.get("adjustments") or []),
                     "total_payout_usd": payout_v,
                     "total_payout_inr": round(payout_v * inr_rate, 2) if inr_rate else 0,
                     "status_note": status_note,
@@ -3122,7 +5581,12 @@ def _compute_pinned_summary(pinned: dict) -> dict:
                     ded_pct = float(comm.get("team_deduction_pct") or 0)
                 ded_v = round(base * ded_pct / 100.0, 2)
             md_v = float(c.get("manage_deal_usd") or 0)
+            md_paid_now = float(c.get("manage_deal_paid_now_usd") or 0)
             payout = float(c.get("total_payout_usd") or 0)
+            quota_v = float(c.get("quota_usd") or 0)
+            rev_v = float(c.get("revenue_achieved_usd") or 0)
+            paid_v = float(c.get("payment_received_usd") or 0)
+            elig_pct_v = float(c.get("eligible_pct") or 0)
             sum_base += base
             sum_deduction += ded_v
             sum_manage += md_v
@@ -3130,12 +5594,19 @@ def _compute_pinned_summary(pinned: dict) -> dict:
             rep_payouts.append(
                 {
                     "name": c.get("name"),
+                    "group": c.get("group") or c.get("compensation_group") or "",
+                    "quota_usd": quota_v,
+                    "revenue_achieved_usd": rev_v,
+                    "payment_received_usd": paid_v,
+                    "achievement_pct": elig_pct_v,
                     "base_commission_usd": base,
                     "deduction_usd": ded_v,
                     "manage_deal_usd": md_v,
+                    "manage_deal_paid_now_usd": md_paid_now,
                     "total_payout_usd": payout,
                     "total_payout_inr": round(payout * inr_rate, 2) if inr_rate else 0,
                     "note": (c.get("note") or "").strip(),
+                    "adjustments_details": list(c.get("adjustments") or []),
                 }
             )
 
@@ -3154,7 +5625,74 @@ def _compute_pinned_summary(pinned: dict) -> dict:
         mgr_final = mgr_base + mgr_pending - mgr_clawback
     mgr_final = float(mgr_final)
 
-    grand_total = sum_payout + max(mgr_final, 0)
+    # Detect when the "manager" is the same person as one of the reps in commission.reps[]
+    # (e.g. Anthony Raymond for ENT — sole rep & treated as manager in the JSON for pending
+    # commission / clawback bookkeeping). If so, the rep's total_payout_usd ALREADY includes
+    # those manager-level pending/clawback adjustments, so we must NOT double-count them in
+    # grand_total.
+    mgr_name_low = (mgr.get("manager_name") or "").strip().lower()
+    manager_is_also_a_rep = bool(mgr_name_low) and any(
+        (rp.get("name") or "").strip().lower() == mgr_name_low for rp in rep_payouts
+    )
+    if manager_is_also_a_rep:
+        grand_total = sum_payout
+    else:
+        grand_total = sum_payout + max(mgr_final, 0)
+
+    # Consolidate ALL prior-period adjustments so the chat bot can list them in one go.
+    # This includes: rep-level adjustments, manager-level clawbacks, manager-level pending
+    # commissions, and team-level exceptions. Users sometimes call all of these "clawbacks".
+    prior_items: list[dict] = []
+    for r in reps:
+        nm = (r.get("name") or "").strip()
+        for adj in (r.get("adjustments") or []):
+            prior_items.append({
+                "kind": "Rep adjustment",
+                "rep_or_manager": nm,
+                "deal_name": adj.get("deal_name"),
+                "period": adj.get("period"),
+                "amount_usd": float(adj.get("commission_usd") or 0),
+                "deal_amount_usd": float(adj.get("paid_amount_usd") or adj.get("deal_amount_usd") or 0),
+                "rate_pct": float(adj.get("rate_pct") or 0),
+                "direction": "+" if float(adj.get("commission_usd") or 0) >= 0 else "−",
+                "note": adj.get("note"),
+            })
+    for cb in (mgr.get("clawbacks") or []):
+        prior_items.append({
+            "kind": "Manager clawback",
+            "rep_or_manager": mgr.get("manager_name"),
+            "deal_name": cb.get("label") or cb.get("deal_name"),
+            "period": cb.get("period"),
+            "amount_usd": -float(cb.get("deduction_usd") or 0),
+            "deal_amount_usd": float(cb.get("deal_amount_usd") or 0),
+            "rate_pct": float(cb.get("rate_pct") or 0),
+            "direction": "−",
+            "note": cb.get("note"),
+        })
+    for p in (mgr.get("pending_commissions") or []):
+        prior_items.append({
+            "kind": "Manager pending commission",
+            "rep_or_manager": mgr.get("manager_name"),
+            "deal_name": p.get("deal_name"),
+            "period": p.get("period"),
+            "amount_usd": float(p.get("commission_usd") or 0),
+            "deal_amount_usd": float(p.get("deal_amount_usd") or 0),
+            "rate_pct": float(p.get("rate_pct") or 0),
+            "direction": "+",
+            "note": p.get("note"),
+        })
+    for ex in exception_lines:
+        prior_items.append({
+            "kind": "Team exception",
+            "rep_or_manager": ex.get("rep"),
+            "deal_name": ex.get("deal_name"),
+            "period": "current",
+            "amount_usd": float(ex.get("share_usd") or 0),
+            "deal_amount_usd": float(ex.get("deal_amount_usd") or 0),
+            "rate_pct": 0,
+            "direction": "+",
+            "note": ex.get("note"),
+        })
 
     return {
         "period": {
@@ -3198,6 +5736,8 @@ def _compute_pinned_summary(pinned: dict) -> dict:
             "payout_usd": round(grand_total, 2),
             "payout_inr": round(grand_total * inr_rate, 2) if inr_rate else 0,
         },
+        "manager_is_also_a_rep": manager_is_also_a_rep,
+        "all_prior_period_items": prior_items,
         "inr_rate_per_usd": inr_rate,
     }
 
@@ -3254,9 +5794,23 @@ def _ask_pinned_with_context(
     team_desc = (pinned.get("manager_incentive") or {}).get("team_label") or ""
 
     system_prompt = (
-        f"You are a helpful, conversational AI assistant — like ChatGPT — for the {team_desc} {period_desc} sales "
+        f"You are a helpful, conversational AI assistant — like ChatGPT — for the **{team_desc} {period_desc}** sales "
         "compensation page. You answer questions naturally and thoroughly, in a friendly tone. You're allowed "
         "to elaborate, give context, and follow up with related insights the user might find useful.\n\n"
+        "**CRITICAL — STRICT TEAM ISOLATION (this is a hard rule, not a guideline):**\n"
+        f"This assistant is SCOPED ONLY to the **{team_desc}** team for **{period_desc}**. You MUST refuse "
+        "to answer questions about other teams. The teams in this product are: SMB, Account Management (AM), "
+        "Enterprise (ENT), and Outbound. They have DIFFERENT policies, different rate cards, different reps, "
+        "different managers, and different pinned data files.\n"
+        f"- If asked about a team OTHER than {team_desc} (e.g. \"What is Anthony's commission?\" on the AM page, "
+        "or \"Who is the SMB manager?\" on the ENT page, or anything about Chitradip / Lawrence / Yogi on the "
+        "AM or ENT pages, or anything about Anthony on the SMB/AM pages), respond with: "
+        "\"I'm scoped to the {team_desc} page only. For that question, please open the relevant team's page "
+        "and ask there.\" Then briefly tell them which page to use (SMB / AM / ENT / Outbound).\n"
+        "- NEVER pull figures from one team to answer about another. NEVER conflate Joy (AM manager) with "
+        "Chitradip (SMB manager) or with Anthony (ENT sole rep). Each is on their own page.\n"
+        "- The `pinned` JSON you're given is the SINGLE SOURCE OF TRUTH for this page. Do not reference "
+        "deals, rates, or people that aren't in this JSON.\n\n"
         "**HOW TO USE THE DATA — CRITICAL FOR ACCURACY:**\n"
         "1. A `summary` object is provided below with ALL totals, percentages, eligibility statuses, and payouts "
         "pre-computed by Python. USE these values directly. NEVER do your own arithmetic — Python's math is reliable, "
@@ -3269,6 +5823,38 @@ def _ask_pinned_with_context(
         "   • Exceptions (e.g. Washington Post server split) are pre-added to `summary.team.achievement_effective_usd` "
         "and `payment_received_effective_usd`.\n"
         "   • Pending commissions are prior-period deals paid in this period; clawbacks are deductions from prior periods.\n"
+        "   • **Eligibility floor for monthly plan (April onwards) is 60% — STRICT.** A rep at 59.9%, 59%, or anything below "
+        "60% earns 0% commission. Always explicitly state this when explaining a non-eligible rep on a monthly page. "
+        "The Q1 quarterly floor is 50%.\n"
+        "   • **ENT-specific:** the Enterprise team has only one person — Anthony Raymond. There is NO separate manager "
+        "incentive; the `manager_incentive` block in the JSON represents Anthony's own commission. ENT slab bands: 0–75.99% → 7%, "
+        "76–100% → 9%, 101–125% → 11%, 126%+ → 13%. ENT uses USD only (no INR conversion). Never describe Anthony as the "
+        "'manager' or use 'manager pool' language for ENT — just call it 'Anthony's commission'.\n"
+        "   • **CRITICAL — manager_is_also_a_rep guard:** when `summary.manager_is_also_a_rep` is `true` (always true for ENT), "
+        "the rep's `total_payout_usd` ALREADY includes the pending commissions and clawbacks listed under `manager_incentive`. "
+        "Do NOT add `rep_payouts_totals.sum_total_payout_usd` and `manager_incentive_summary.final_payout_usd` together — "
+        "that double-counts. In this case the correct total is simply `summary.grand_total.payout_usd` (which equals the rep's "
+        "single total_payout_usd). Never write a 'Manager final payout' line, never refer to 'manager pool', and never say "
+        "'Grand total = rep + manager' for ENT. Just present **Total payout: $X** with the breakdown of base + pending − clawback.\n"
+        "   • **AM-specific:** the Account Management team for Q1 2026 has 3 reps + 1 manager (Joy is both a rep and the "
+        "manager — `is_manager: true`). Reps: Arundhati Sen, Vivin Joseph, Joy Prakash. Nikita Shekher also owns a Q1 deal "
+        "(NerdsToGo) even though she's not a commissioned AM rep. AM Q1 commission rate is 1% of payment received (with a "
+        "10% deduction for reps without a manage deal). AM eligibility floor is 50% of individual quota. The manager Joy is "
+        "paid 1.5% of team payment received minus the Wipro Q4 clawback. AM uses USD with INR conversion at ₹86/USD.\n"
+        "   • **AM deal-level data:** `pinned.paid_deals` (33 entries — includes 1 partially-paid Artnet deal of $11,566 with "
+        "`is_partial: true`) and `pinned.unpaid_deals_overrides` (4 entries — Allied Gold, Estée Lauder, Church & Dwight, "
+        "NerdsToGo, plus the Artnet partial remainder of $11,566 with `is_partial_remainder: true`). Total = 37 deals "
+        "closed in Q1: 33 with payment received (incl. 1 partial), 4 with no payment. Deal owners: Vivin (22), Joy (11), "
+        "Arundhati (3), Nikita (1). When asked about deal counts, owner breakdown, or rep-level pending vs received, surface "
+        "this data with the per-owner totals.\n"
+        "   • **Partial-payment math (Artnet only):** Artnet appears in BOTH `paid_deals` ($11,566 paid portion, `is_partial: true`) "
+        "AND `unpaid_deals_overrides` ($11,566 unpaid remainder, `is_partial_remainder: true`). The total deal value is "
+        "$23,132. For deal counts, treat Artnet as ONE deal (not two). For dollar totals, both halves are real.\n"
+        "   • **`summary.all_prior_period_items`** is the SINGLE LIST of every prior-period item: manager clawbacks, "
+        "manager pending commissions, rep-level adjustments (e.g. Yogi's Yieldstreet/Willow Wealth), and team exceptions "
+        "(e.g. Washington Post). When asked about ANY of: clawback, adjustment, exception, pending, carry-over, or a "
+        "specific deal name like 'Willow Wealth' / 'Wipro' / 'Krish', list everything from this array grouped by kind. "
+        "Users often use the words 'clawback' / 'adjustment' / 'exception' interchangeably — always list all of them.\n"
         "4. Format: USD with `$` and thousands separators ($2,561.34). INR with `₹` using `summary.inr_rate_per_usd`.\n"
         "5. Show your reasoning step-by-step and cite the actual numbers — users want to see how the figure was built.\n"
         "6. If the question can't be answered from the provided data, say so honestly. Don't invent.\n\n"
@@ -3280,19 +5866,177 @@ def _ask_pinned_with_context(
         "- Offer a follow-up suggestion at the end (\"Want me to also compare last quarter's payout?\" — only if relevant).\n"
         "- Keep tone friendly, not robotic.\n\n"
         "**WORKED EXAMPLES:**\n\n"
-        "Q: \"What is the total payout for this month including the manager?\"\n"
+        "Q (SMB/AM): \"What is the total payout for this month including the manager?\"\n"
         "A: The total payout is **$X** (≈ ₹Y @ ₹86/USD).\n"
         "Here's how it breaks down:\n"
         "- Sales rep payouts (sum from `rep_payouts_totals.sum_total_payout_usd`): $A\n"
         "- Manager final payout (`manager_incentive_summary.final_payout_usd`): $B\n"
         "- Grand total: $X\n"
         "(Note: Vivin shows $0 because he left the org — his deals still count toward the team though.)\n\n"
-        "Q: \"Why is Joy eligible this month?\"\n"
+        "Q (AM): \"Why is Joy eligible this month?\"\n"
         "A: Joy is eligible because the team achievement is **{team_pct}%**, which is above the **60% floor**.\n"
         "- Team achievement (effective): $X (raw HubSpot $Y + Washington Post exception $17,500)\n"
         "- That puts the team in the 81–99% band → 3% rate\n"
         "- Joy's manager commission: $X × 3% = $...\n"
-        "- After Q1 carry-forward ($78) and pending Q1 deals ($427.22 from Krish, Artnet, Church & Dwight), her final is $2,561.34.\n"
+        "- After Q1 carry-forward ($78) and pending Q1 deals ($427.22 from Krish, Artnet, Church & Dwight), her final is $2,561.34.\n\n"
+        "**ENT WORKED EXAMPLES (Anthony Raymond, Q1 FY2026):**\n\n"
+        "Q (ENT): \"What is Anthony's total Q1 FY2026 payout, including Q4 pending deals?\"\n"
+        "A: Anthony's total Q1 FY2026 payout is **$22,055.57**.\n\n"
+        "**Performance**\n"
+        "- Quota: $1,000,000\n"
+        "- Revenue achieved (booked): $453,168.40 (45.3% of quota)\n"
+        "- Payment received (after excluding 3 Not-Paid deals totaling $198,874.50): **$254,293.90**\n\n"
+        "**Base commission (Q1)**\n"
+        "- 45.3% lands in the **0–75.99% ENT slab band → 7%** commission rate.\n"
+        "- Commission is calculated on **Payment Received**, not booked revenue:\n"
+        "- $254,293.90 × 7% = **$17,800.57**\n\n"
+        "**Q4 pending commissions (paid in Q1 at 10% Q4 rate)**\n"
+        "- Armstrong World Industries — BDO USA, LLP — Partner Deal ($28,008 × 10%) = +$2,801\n"
+        "- Chryselys — Egnyte to MS SharePoint (Remaining 25%) ($5,292 × 10%) = +$529\n"
+        "- Forvis Mazars ($18,000 × 10%) = +$1,800\n"
+        "- **Subtotal: +$5,130**\n\n"
+        "**Refunds / clawbacks**\n"
+        "- Cambrex — Dropbox to MS (Q4 cancelled / refunded $8,747 × 10%) = **−$875**\n\n"
+        "**Final math**\n"
+        "- $17,800.57 + $5,130 − $875 = **$22,055.57**\n\n"
+        "Q (ENT): \"Which Q1 deals were Not Paid? How are they excluded from Payment Received?\"\n"
+        "A: Three Q1 deals were marked **Not Paid** in HubSpot at the time the Q1 commission was calculated. "
+        "Per ENT policy, commission is calculated on **Payment Received**, not booked revenue — so these deals are excluded from the commission base until payment arrives.\n\n"
+        "| Deal | Close date | Amount |\n"
+        "| --- | --- | --- |\n"
+        "| The Estée Lauder Companies Inc. — Dropbox to SharePoint Online | 2026-02-06 | $160,000.00 |\n"
+        "| Experian Information Solutions, Inc. — Slack to Teams AIO | 2026-03-31 | $4,356.00 |\n"
+        "| CloudSoft — Google to MS | 2026-03-26 | $34,518.50 |\n\n"
+        "**Total unpaid: $198,874.50**\n\n"
+        "**Math:** Booked $453,168.40 − Not Paid $198,874.50 = **Payment Received $254,293.90**. "
+        "Anthony's Q1 base commission is therefore $254,293.90 × 7% = **$17,800.57** — not $453,168.40 × 7%. "
+        "Once payment arrives for any of these deals, the corresponding commission is released in a future cycle.\n\n"
+        "Q (ENT): \"What is the Cambrex refund and how is it deducted?\"\n"
+        "A: The **Cambrex — Dropbox to MS** deal was a Q4 FY2025 deal that was later cancelled and the customer was refunded $8,747. "
+        "The commission that was previously paid out on that deal at the **Q4 rate (10%)** is now clawed back from Q1:\n"
+        "- Refund amount: $8,747\n"
+        "- Rate previously paid: 10% (Q4 FY2025 rate)\n"
+        "- Clawback: $8,747 × 10% = **−$875**\n\n"
+        "**How it flows into Anthony's total:** Q1 base $17,800.57 + Q4 pending +$5,130 − Cambrex clawback −$875 = **$22,055.57**.\n\n"
+        "Q (ENT): \"Explain the ENT commission calculation step by step.\"\n"
+        "A: Use this exact 7-step structure with numbered headings — never abbreviate when the user asks "
+        "for a step-by-step. Each step has a heading, policy context, and math.\n\n"
+        "## Q1 FY2026 — ENT commission calculation, step by step\n\n"
+        "### Step 1 — Pull the team's Q1 performance\n"
+        "- Quota: $1,000,000\n"
+        "- Booked revenue: $453,168.40 → 45.3% of quota\n\n"
+        "### Step 2 — Exclude Q1 deals that were Not Paid\n"
+        "ENT policy: commission is calculated on **Payment Received**, not booked revenue. Any deal still "
+        "marked Not Paid in HubSpot at the time the commission is run is excluded from the base.\n"
+        "- The Estée Lauder Companies — Dropbox to SharePoint ($160,000.00)\n"
+        "- Experian — Slack to Teams AIO ($4,356.00)\n"
+        "- CloudSoft — Google to MS ($34,518.50)\n"
+        "- **Total Not-Paid: $198,874.50**\n"
+        "Math: $453,168.40 − $198,874.50 = **Payment Received $254,293.90**.\n\n"
+        "### Step 3 — Determine the slab band\n"
+        "ENT slab bands: 0–75.99% → 7%, 76–100% → 9%, 101–125% → 11%, 126%+ → 13%.\n"
+        "At 45.3% of quota, Anthony lands in the 0–75.99% band → **7%** commission rate. "
+        "(ENT has a 0% eligibility floor — any positive revenue qualifies.)\n\n"
+        "### Step 4 — Calculate Q1 base commission\n"
+        "Base = Payment Received × Slab % = $254,293.90 × 7% = **$17,800.57**.\n"
+        "We use Payment Received, NOT booked revenue.\n\n"
+        "### Step 5 — Add Q4 pending commissions (paid in Q1 at the Q4 10% rate)\n"
+        "- Armstrong World Industries — BDO USA, LLP ($28,008 × 10%) = +$2,801\n"
+        "- Chryselys — Egnyte to MS SharePoint (Remaining 25%) ($5,292 × 10%) = +$529\n"
+        "- Forvis Mazars ($18,000 × 10%) = +$1,800\n"
+        "- **Subtotal pending: +$5,130**\n\n"
+        "### Step 6 — Deduct Q4 refunds / clawbacks\n"
+        "Cambrex — Dropbox to MS (cancelled Q4 deal, $8,747 refunded × 10%) = **−$875**.\n\n"
+        "### Step 7 — Add it all up\n"
+        "Q1 base $17,800.57 + Q4 pending +$5,130 − Q4 clawback −$875 = **$22,055.57**.\n\n"
+        "### ✅ Final Q1 FY2026 payout: **$22,055.57** (USD only — no INR conversion for ENT)\n\n"
+        "**AM WORKED EXAMPLES (Joy / Vivin / Arundhati, Q1 FY2026):**\n\n"
+        "Q (AM): \"How many deals did the AM team close, how many paid, how many not paid?\"\n"
+        "A:\n"
+        "- 📦 **Total deals closed**: **37**\n"
+        "- ✅ **Payment received**: **33 deal(s)** — total $100,107.40 (includes 1 partially-paid Artnet at $11,566)\n"
+        "- ❌ **Payment not received**: **4 deal(s)** — excluded value $56,697 (Allied Gold $1,800, Estée Lauder $26,416, Church & Dwight $14,615, NerdsToGo $2,300, plus Artnet partial remainder $11,566)\n\n"
+        "Q (AM): \"Break down deals by owner — how many did each rep close?\"\n"
+        "A:\n"
+        "| Deal Owner | Total | Payment received | Payment not received | Booked Amount | $ Received | $ Pending |\n"
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n"
+        "| **Vivin Joseph** | 22 | 21 | 1 | $61,981 | $60,181 | $1,800 |\n"
+        "| **Joy Prakash** | 11 | 9 (1-Partial Paid) | 2 (1-Partial Payment not received) | $88,920 | $36,323 | $52,597 |\n"
+        "| **Arundhati Sen** | 3 | 3 | 0 | $3,600 | $3,600 | $0 |\n"
+        "| **Nikita Shekher** | 1 | 0 | 1 | $2,300 | $0 | $2,300 |\n"
+        "| **Total (AM team)** | **37** | **33** | **4** | **$156,801** | **$100,104** | **$56,697** |\n\n"
+        "Q (AM): \"How much is pending vs received at rep level?\"\n"
+        "A: At rep level, the $ pending = sum of their Not-Paid deal amounts (incl. partial remainders). Received = sum of paid amounts (incl. partial paid portions).\n"
+        "- **Vivin Joseph**: Received $60,181 · Pending $1,800 (Allied Gold)\n"
+        "- **Joy Prakash**: Received $36,323 · Pending $52,597 (Estée Lauder $26,416 + Church & Dwight $14,615 + Artnet partial remainder $11,566)\n"
+        "- **Arundhati Sen**: Received $3,600 · Pending $0\n"
+        "- **Nikita Shekher**: Received $0 · Pending $2,300 (NerdsToGo - DropBox to MS for Carolina Contracting)\n"
+        "- **Team total**: Received **$100,104** · Pending **$56,697**\n\n"
+        "Q (AM): \"Why is Arundhati Sen not eligible?\"\n"
+        "A: This is a question about **Arundhati only** — do NOT show other reps' figures.\n\n"
+        "**Performance vs quota**\n"
+        "- Individual quota: $50,000\n"
+        "- Revenue achieved (booked): $3,600 → **7% of quota**\n"
+        "- Payment received: $3,600\n\n"
+        "**Eligibility check**\n"
+        "AM Q1 eligibility floor: **50% of individual quota**. Arundhati is at **7%** — far below the 50% floor → **not eligible**. ❌\n\n"
+        "**Commission result**: Because Arundhati did not meet the 50% floor, her base commission for Q1 is **$0.00**. Her 3 deals "
+        "(Ampleo $1,000, Greene IS $1,000, IT Solutions for Renovus $1,600) still count toward team Booked Amount / Payment Received "
+        "(which flow into Joy's manager incentive), but they don't earn Arundhati personal commission this quarter.\n\n"
+        "### ❌ Final Q1 FY2026 payout: **$0.00**\n\n"
+        "Q (AM): \"Explain Vivin Joseph's Q1 commission — base, 10% deduction, and the Vendasta manage deal.\"\n"
+        "A: This is a question about **Vivin only** — do NOT show other reps' figures.\n\n"
+        "**Performance vs quota**\n"
+        "- Individual quota: $100,000\n"
+        "- Revenue achieved (booked): $61,981 → **62% of quota** ✅ above 50% floor\n"
+        "- Payment received: $60,181 (Allied Gold $1,800 is Not Paid → excluded)\n\n"
+        "**Base commission (1% of Payment Received)**\n"
+        "Base = $60,181 × 1% = **$602**\n\n"
+        "**10% deduction** (AM policy — reps without a Q1 manage deal incur a 10% deduction)\n"
+        "Deduction = $602 × 10% = **−$60**\n"
+        "After deduction: $542\n\n"
+        "**Q4 Vendasta CloudFuze Manage Deal incentive** (paid in Q1 at the 10% manage-deal rate)\n"
+        "Manage deal = $6,300 × 10% = **+$630**\n\n"
+        "**Final math**\n"
+        "$602 − $60 + $630 = **$1,172**\n\n"
+        "### ✅ Final Q1 FY2026 payout: **$1,172.00** (≈ ₹100,792 @ ₹86/USD)\n\n"
+        "Q (AM): \"Explain Joy's manager commission calculation step by step.\"\n"
+        "A: Joy is both a rep and the AM manager. Her commission flows entirely through `manager_incentive`:\n"
+        "1. **Team Payment Received**: $100,107 (booked $156,801 − $56,698 not paid).\n"
+        "2. **Manager rate**: 1.5% of team payment received → $100,107 × 1.5% = $1,502.\n"
+        "3. **Q4 pending**: +$55 (Krish Services Group MARS overage — Q4 deal paid in Q1 at the Q4 1% rate).\n"
+        "4. **Q4 Wipro clawback**: $54,515 × 3% = −$1,635 (Wipro Q4 deal cancelled; the slab was originally 4% but the correct slab is 1%, so 3% × $54,515 is clawed back).\n"
+        "5. **Final**: $1,502 + $55 − $1,635 = **−$78**. No payout for Q1 — the −$78 balance carries forward to the next cycle.\n\n"
+        "**SMB WORKED EXAMPLES (Chitradip + 7 reps, Q1 FY2026):**\n\n"
+        "Q (SMB): \"How many deals did the SMB team close — paid, not paid, cancelled?\"\n"
+        "A:\n"
+        "- 📦 **Total effective deals closed**: **44** (cancellations excluded)\n"
+        "- ✅ **Payment received**: **40 deal(s)** — total **$354,597** (official from `manager_incentive.team_payment_received_usd`)\n"
+        "- ❌ **Payment not received**: **4 deal(s)** — excluded value **$71,336** (Legal Soft $20,706, CTI Technology $3,262, Allied Gold $2,500, OnCloud $44,868)\n"
+        "- ⚠️ **Cancelled**: **1 deal** — Keytel Systems $2,000 (closed Won 2026-03-31 but later cancelled — removed from team achievement)\n\n"
+        "Team-level: Booked Amount **$425,934** · Payment Received **$354,597** · Pending **$71,336**.\n\n"
+        "Q (SMB): \"Explain Lawrence Lewis's 2 manage deals.\"\n"
+        "A: Lawrence Lewis closed **2 manage deals** in Q1 FY2026:\n"
+        "1. **The Commit Partnership - CF Manage** ($1,319, Paid, Closed Won 2026-03-10) — payment received → manage deal commission of $500 **paid this cycle**.\n"
+        "2. **Legal Soft - Migrate(GWS to GWS) + Manage** ($20,706, Paid in HubSpot but payment not yet processed at the commission-cutoff date) — This deal combines a Migration ($9,942) and a Manage portion ($10,764). Because the payment hasn't been received, the $500 manage commission is **pending next cycle** and will release once payment arrives.\n\n"
+        "**Math**: 2 manage deals × $500 = **$1,000 total earned**. **$500 paid this cycle** (Commit Partnership); **$500 pending** (Legal Soft).\n\n"
+        "Lawrence is at **49% of quota** ($73,235.50 / $150,000), **below the 50% eligibility floor**, so his regular base commission is $0. However, manage deal incentive is paid regardless of overall quota achievement — it has its own eligibility separate from the regular commission floor.\n\n"
+        "**Final Q1 payout for Lawrence: $500** (manage deal portion). _Additionally, Lawrence left the organization in April, so no further payouts were processed afterward._\n\n"
+        "Q (SMB): \"Why was the Keytel Systems deal cancelled?\"\n"
+        "A: **Keytel Systems - Box to SharePoint** ($2,000, Owner: Yogesh Vig) was Closed Won on 2026-03-31, but the deal was **subsequently cancelled**. The impact:\n"
+        "- **Team Booked Amount** drops from $427,934 to **$425,934** (−$2,000)\n"
+        "- **Yogesh Vig's individual achievement** drops from $73,563 (73.6% of quota) to **$71,563** (71.6% of quota)\n"
+        "- Payment Received is **unaffected** (the deal was Not Paid anyway — no money was collected)\n\n"
+        "Q (SMB): \"Explain Chitradip's manager commission step by step (incl. all 3 Q4 clawbacks).\"\n"
+        "A:\n"
+        "1. **Team target**: $850,000. **Team payment received**: $354,597. Team achievement: 50% → eligible.\n"
+        "2. **Manager rate**: 1.5% (flat) → Base = $354,597 × 1.5% = **$5,319**\n"
+        "3. **Q4 clawbacks** (3 items):\n"
+        "   - Q4 Royston / Synergy Employment: $4,395.35 × 1% = **−$44** ($4,395.35 counted but not received | Chit 1% slab)\n"
+        "   - Q4 Yogi / CEG Solutions ($15,009) + Yieldstreet ($17,068): $32,077 × 1% = **−$321** (Chit 1% slab)\n"
+        "   - Noventiq Q3 deduction: $13,410 × 1.5% = **−$201** (1.5% on $13,410)\n"
+        "   - **Total clawback: −$566**\n"
+        "4. **Final**: $5,319 − $566 = **$4,753** ✅ (≈ ₹408,758 @ ₹86/USD)\n"
     )
 
     msgs: list[dict] = []
@@ -3371,8 +6115,14 @@ def render_pinned_chat_assistant(pinned: dict, session_prefix: str = "pinned") -
         period_lbl = "this period"
 
     team_label = (pinned.get("manager_incentive") or {}).get("team_label") or ""
-    if "account" in team_label.lower() or session_prefix.startswith("am"):
+    tl_low = team_label.lower()
+    sp_low = session_prefix.lower()
+    if "account" in tl_low or sp_low.startswith("am"):
         team_short = "AM"
+    elif "enterprise" in tl_low or "ent" in tl_low or sp_low.startswith("ent"):
+        team_short = "ENT"
+    elif "outbound" in tl_low or sp_low.startswith("ob") or sp_low.startswith("outbound"):
+        team_short = "Outbound"
     else:
         team_short = "SMB"
 
@@ -3399,14 +6149,118 @@ def render_pinned_chat_assistant(pinned: dict, session_prefix: str = "pinned") -
             "Running in offline mode — answers come from the pinned data on this page."
         )
 
-    suggested = [
-        f"What is the total team payout for {period_lbl}, including the manager?",
-        "Explain the manager's commission calculation step by step.",
-        "Who is eligible for commission this period, and who is not? Why?",
-        "Are there any clawbacks, exceptions, or pending commissions I should know about?",
-        "Show me each rep's commission breakdown, including INR conversion.",
-        "Summarize the key insights from this page in 3 bullets.",
-    ]
+    # Team + Period aware suggested prompts. Each set is strictly scoped to ITS team AND
+    # the currently-selected period (Q1 vs April vs May etc.) — no cross-team mixing, and
+    # the prompts always reference the specific numbers/events from the active pinned file.
+    _is_q1 = bool(quarter) and int(quarter) == 1
+    _is_apr = bool(month) and int(month) == 4
+    _is_may = bool(month) and int(month) == 5
+    _is_monthly = bool(month)
+
+    if team_short == "ENT":
+        # ENT is Q1-only for now (no monthly ENT plan).
+        suggested = [
+            f"What is Anthony's total Q1 FY2026 payout, including Q4 pending deals?",
+            f"Explain the ENT commission calculation step by step.",
+            f"Which Q1 deals were Not Paid? How are they excluded from Payment Received?",
+            f"List all paid Q1 ENT deals — which ones contributed to the $254,293.90 Payment Received?",
+            f"How many deals did the ENT team close, how many were paid, and how many weren't?",
+            f"What are the Q4 pending commissions paid in {period_lbl}?",
+            f"What is the Cambrex refund and how is it deducted?",
+            f"Summarize the ENT Q1 commission in 3 bullets.",
+        ]
+    elif team_short == "AM":
+        if _is_apr:
+            suggested = [
+                f"What is the total AM team payout for {period_lbl}, including Joy's manager incentive?",
+                "Explain Joy's April manager commission step by step (with Washington Post exception).",
+                "What is the Washington Post server-split exception, and how does it flow into Joy's April payout?",
+                "Which Q1 FY2026 deals were paid in April — NerdsToGo, Church & Dwight, Artnet — and what commission was earned?",
+                "What is the Q1 carry-forward Wipro clawback ($78) and how is it deducted from April?",
+                "How many April AM deals were closed, and how many were paid?",
+                "Break down April AM deals by owner — Vivin, Joy, Arundhati.",
+                "Why is Vivin's April payout $0 — did he leave the organization?",
+                f"Summarize the AM {period_lbl} commission in 3 bullets.",
+            ]
+        elif _is_may:
+            suggested = [
+                f"What is the total AM team payout for {period_lbl}, including Joy's manager incentive?",
+                "Why is Joy earning $0 for May (team is at 15.4%, well below the 60% floor)?",
+                "Why is Arundhati Sen not eligible for May commission ($6,229 / $35,000 = 17.80%)?",
+                "Deepak joined the AM team mid-May with a $25K quota — is he eligible for any commission?",
+                "How many May AM deals were closed, and which one wasn't paid (SLR Consulting - Slack to Teams)?",
+                f"Break down {period_lbl} AM deals by owner — Joy, Arundhati, Deepak.",
+                "Explain Joy's May performance — 4 deals totaling $9,176 booked, $6,800 received.",
+                f"Summarize the AM {period_lbl} commission in 3 bullets.",
+            ]
+        else:
+            # Default: AM Q1 (existing)
+            suggested = [
+                f"What is the total AM team payout for {period_lbl}, including Joy's manager incentive?",
+                "Explain Joy's manager commission calculation step by step (incl. Wipro clawback).",
+                "How many deals did the AM team close — how many paid, how many not paid?",
+                "Break down deals by owner — how many did Vivin, Joy, Arundhati and Nikita close?",
+                "At rep level, how much was received vs how much is pending per rep?",
+                "Which AM Q1 deals are Not Paid (or only partially paid)? Show Artnet, Estée Lauder, Church & Dwight, Allied Gold, NerdsToGo.",
+                "Explain Vivin Joseph's Q1 commission — base, 10% deduction, and the Vendasta manage deal.",
+                "Why is Arundhati Sen not eligible for commission this quarter?",
+                "Summarize the AM Q1 commission in 3 bullets.",
+            ]
+    elif team_short == "Outbound":
+        suggested = [
+            f"What is the total outbound meeting payout for {period_lbl}?",
+            "How are outbound meeting incentives calculated (per region)?",
+            "Which regions are eligible for outbound incentives?",
+            "What are the rules for No-Show / Meeting Validation?",
+            "Show outbound meeting counts by rep.",
+            "Summarize the outbound payout structure in 3 bullets.",
+        ]
+    else:
+        # SMB (ENT and AM handled above with team-specific prompts).
+        if _is_apr:
+            suggested = [
+                f"What is the total SMB team payout for {period_lbl}, including Chitradip's manager incentive?",
+                "Explain Yogi's April commission — Yieldstreet Q4 pending and rounded total $1,004.",
+                "Why did Lawrence Lewis's April eligibility change — did he leave the organization?",
+                "What is Chitradip's April manager commission (Willow Wealth $170.68 + Legal Soft $310.60 pending)?",
+                "How many April SMB deals were closed, and how many had payment received?",
+                f"Break down {period_lbl} SMB deals by owner (Vicky, Yogi, Kritika, Lawrence, Deepak, Rutuja).",
+                f"Who is eligible for SMB commission in {period_lbl} (strict 60% floor)?",
+                f"Summarize the SMB {period_lbl} commission in 3 bullets.",
+            ]
+        elif _is_may:
+            suggested = [
+                f"What is the total SMB team payout for {period_lbl}, including Chitradip's manager incentive?",
+                "Explain Kritika's May commission — $1,979.40 gross with the $581.50 clawback → $1,397.90 net.",
+                "Explain Yogi's May commission — May base ($513) + April SBG-Corp deal ($319) + Pending Commission ($581.50) = $1,413.50.",
+                "Rutuja is at 65% attainment against her $25K quota — what commission does she earn?",
+                "Why is Chitradip earning $0 for May (team is at 51.6%, below the 60% floor)?",
+                "Who is Lennis Brown (Deactivated User) and how does his ICS Data deal factor into the team?",
+                "How many May SMB deals were closed, and which one wasn't paid (Protecht - Box to SharePoint)?",
+                f"Break down {period_lbl} SMB deals by owner (Kritika, Yogi, Rutuja, Vicky, Lennis).",
+                f"Summarize the SMB {period_lbl} commission in 3 bullets.",
+            ]
+        elif _is_q1:
+            suggested = [
+                f"What is the total SMB team payout for {period_lbl}, including Chitradip's manager incentive?",
+                "Explain Chitradip's manager commission calculation step by step (incl. all 3 Q4 clawbacks).",
+                "How many deals did the SMB team close — paid, not paid, cancelled?",
+                "Break down SMB deals by owner — Vicky, Kritika, Lawrence, Yogesh, Deepak, Royston, Kartik.",
+                "Explain Lawrence Lewis's 2 manage deals — why only $500 was paid this cycle and $500 is pending.",
+                "Why was the Keytel Systems deal cancelled and how does it affect Yogi's achievement?",
+                "Who is eligible for SMB commission this Q1, and who is not? Why?",
+                "Show me each SMB rep's commission breakdown including INR conversion.",
+            ]
+        else:
+            # Fallback for other SMB periods (Q2, Q3, other months)
+            suggested = [
+                f"What is the total SMB team payout for {period_lbl}, including Chitradip's manager incentive?",
+                f"Explain Chitradip's manager commission calculation for {period_lbl}.",
+                f"How many SMB deals were closed in {period_lbl} — paid vs not paid?",
+                f"Break down {period_lbl} SMB deals by owner.",
+                f"Who is eligible for SMB commission in {period_lbl}?",
+                f"Summarize the SMB {period_lbl} commission in 3 bullets.",
+            ]
 
     cols = st.columns(2)
     for i, prompt in enumerate(suggested):
@@ -3447,7 +6301,20 @@ def render_pinned_chat_assistant(pinned: dict, session_prefix: str = "pinned") -
 
 
 def render_pinned_smb_manager_view(pinned: dict) -> None:
-    """Pinned manager incentive view for SMB Q1 2026 (Chitradip): per-rep table, manager metrics, highlighted clawbacks, final payout."""
+    """Pinned manager incentive view for SMB Q1 2026 (Chitradip): per-rep table, manager metrics, highlighted clawbacks, final payout.
+
+    User-level filtering: SALES_REPs see only their own row/deals. Chitradip (manager)
+    and ADMIN see everything. If a SALES_REP is looking at this view and they aren't
+    Chitradip, the manager block is hidden (only their personal row/deals shown).
+    """
+    _current_user = st.session_state.get("user") if hasattr(st, "session_state") else None
+    _user_matchers = _get_user_rep_name_matchers(_current_user)
+    if _user_matchers:
+        pinned = _filter_pinned_for_user(pinned, _current_user)
+        st.info(
+            f"🔒 **Personal view** — showing only your data for Q{pinned.get('quarter')} FY{pinned.get('year')}. "
+            "Team totals are shown for context."
+        )
     mgr = pinned.get("manager_incentive") or {}
     if not mgr:
         return
@@ -4033,6 +6900,22 @@ def _render_smb_goal_attainment_table() -> None:
 
     pinned = _load_pinned_smb_quarter(int(year), int(quarter))
     if pinned is not None:
+        # ---- User-level filter: everyone except ADMIN sees only their own data ----
+        _current_user = st.session_state.get("user") if hasattr(st, "session_state") else None
+        _user_role = (_current_user or {}).get("role") or "unknown"
+        _user_name = (_current_user or {}).get("full_name") or (_current_user or {}).get("email") or "unknown"
+        _user_matchers = _get_user_rep_name_matchers(_current_user)
+        if _user_matchers:
+            pinned = _filter_pinned_for_user(pinned, _current_user)
+            st.info(
+                f"🔒 **Personal view** — showing only your data for Q{quarter} FY{year} "
+                f"(logged in as **{_user_name}**, role: {_user_role}). Team totals shown for context."
+            )
+        elif _user_role.upper() != "ADMIN":
+            st.warning(
+                f"⚠️ Filter not applied — logged in as **{_user_name}** (role: {_user_role}). "
+                "If you expected to see only your own data, please contact your administrator to set your `full_name` on your user record."
+            )
         rep_rows: list[dict] = []
         for r in (pinned.get("reps") or []):
             try:
@@ -4077,6 +6960,350 @@ def _render_smb_goal_attainment_table() -> None:
             )
         parts.extend(["</div>", "</div>"])
         st.markdown("".join(parts), unsafe_allow_html=True)
+
+        # ---- Deal-count strip + deal-owner / per-owner breakdown (mirrors AM Q1 page) ----
+        paid_deals_smb = pinned.get("paid_deals") or []
+        unpaid_deals_smb = pinned.get("unpaid_deals_overrides") or []
+        deals_summary_smb = pinned.get("deals_summary") or {}
+        if paid_deals_smb or unpaid_deals_smb:
+            # Separate cancelled deals — they were closed but no longer count in achievement.
+            cancelled_deals_smb = [d for d in unpaid_deals_smb if d.get("is_cancelled")]
+            non_cancelled_unpaid_smb = [d for d in unpaid_deals_smb if not d.get("is_cancelled") and not d.get("is_partial_remainder")]
+            paid_count_smb = len(paid_deals_smb)
+            unpaid_count_smb = len(non_cancelled_unpaid_smb)
+            cancelled_count_smb = len(cancelled_deals_smb)
+            # Total deals = effective closed count (excludes cancelled deals — they no longer count).
+            total_closed_smb = int(deals_summary_smb.get("total_deals_closed") or (paid_count_smb + unpaid_count_smb))
+            paid_sum_smb = sum(float(d.get("amount_usd") or 0) for d in paid_deals_smb)
+            unpaid_sum_smb = sum(float(d.get("amount_usd") or 0) for d in non_cancelled_unpaid_smb)
+            cancelled_sum_smb = sum(float(d.get("amount_usd") or 0) for d in cancelled_deals_smb)
+            # Combined value = booked amount AFTER cancellations (= official team_achievement_usd)
+            official_team_ach = float(pinned.get("team_achievement_usd") or (paid_sum_smb + unpaid_sum_smb))
+            combined_value_smb = official_team_ach
+
+            st.markdown(
+                "<div style='display:grid;grid-template-columns:repeat(3, 1fr);gap:12px;margin-top:14px;'>"
+                # Card 1 — Total closed
+                "<div style='background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:14px 16px;'>"
+                "<div style='font-size:12px;font-weight:600;color:#3730a3;text-transform:uppercase;letter-spacing:0.5px;'>📦 Total deals closed</div>"
+                f"<div style='font-size:32px;font-weight:700;color:#1e3a8a;margin-top:4px;'>{total_closed_smb}</div>"
+                f"<div style='font-size:12px;color:#475569;margin-top:2px;'>Combined value: ${combined_value_smb:,.2f}"
+                + (f" <span style='color:#991b1b;'>(after ${cancelled_sum_smb:,.2f} cancellation)</span>" if cancelled_sum_smb else "")
+                + "</div>"
+                "</div>"
+                # Card 2 — Payment received
+                "<div style='background:#ecfdf5;border:1px solid #86efac;border-radius:10px;padding:14px 16px;'>"
+                "<div style='font-size:12px;font-weight:600;color:#166534;text-transform:uppercase;letter-spacing:0.5px;'>✅ Payment received</div>"
+                f"<div style='font-size:32px;font-weight:700;color:#14532d;margin-top:4px;'>{paid_count_smb} <span style='font-size:16px;font-weight:500;'>deal(s)</span></div>"
+                f"<div style='font-size:12px;color:#166534;margin-top:2px;'>Total: ${paid_sum_smb:,.2f}</div>"
+                "</div>"
+                # Card 3 — Payment NOT received
+                "<div style='background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;padding:14px 16px;'>"
+                "<div style='font-size:12px;font-weight:600;color:#991b1b;text-transform:uppercase;letter-spacing:0.5px;'>❌ Payment not received</div>"
+                f"<div style='font-size:32px;font-weight:700;color:#7f1d1d;margin-top:4px;'>{unpaid_count_smb} <span style='font-size:16px;font-weight:500;'>deal(s)</span></div>"
+                f"<div style='font-size:12px;color:#991b1b;margin-top:2px;'>Excluded value: ${unpaid_sum_smb:,.2f}</div>"
+                "</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Cancellation banner — explains the achievement reduction.
+            if cancelled_deals_smb:
+                cancellation_rows = []
+                for d in cancelled_deals_smb:
+                    dn = html_module.escape((d.get("deal_name") or "").strip())
+                    owner = html_module.escape((d.get("deal_owner") or "").strip())
+                    cd = html_module.escape((d.get("close_date") or "").strip())
+                    amt = float(d.get("amount_usd") or 0)
+                    reason = html_module.escape((d.get("reason") or "").strip())
+                    cancellation_rows.append(
+                        f"<li style='margin:6px 0;'><strong>{dn}</strong> — Rep: {owner} · Amount: <strong>${amt:,.2f}</strong> · Closed Won {cd}"
+                        + (f"<br/><span style='font-size:12px;color:#78350f;'>{reason}</span>" if reason else "")
+                        + "</li>"
+                    )
+                pre_cancel_total = official_team_ach + cancelled_sum_smb
+                st.markdown(
+                    "<div style='margin:14px 0 10px 0;padding:14px 18px;background:#fef3c7;border:2px solid #f59e0b;border-radius:10px;'>"
+                    "<div style='font-size:13px;font-weight:700;color:#78350f;text-transform:uppercase;letter-spacing:0.5px;'>⚠️ Cancellation note</div>"
+                    f"<div style='font-size:13px;color:#78350f;margin-top:6px;'><strong>{cancelled_count_smb} deal(s) subsequently cancelled — reducing team achievement from ${pre_cancel_total:,.2f} to ${official_team_ach:,.2f}.</strong></div>"
+                    f"<ul style='margin:8px 0 0 0;padding-left:22px;color:#78350f;font-size:13px;'>{''.join(cancellation_rows)}</ul>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # ---- Deal owner breakdown table ----
+            # Cancelled deals: don't count in Booked Amount or Pending. Track separately.
+            smb_owners: dict[str, dict] = {}
+            for d in paid_deals_smb:
+                o = smb_owners.setdefault(d.get("deal_owner") or "—", {
+                    "paid_n": 0, "unpaid_n": 0, "cancelled_n": 0,
+                    "booked": 0.0, "paid_usd": 0.0, "pending_usd": 0.0, "cancelled_usd": 0.0,
+                })
+                amt = float(d.get("amount_usd") or 0)
+                o["paid_n"] += 1
+                o["paid_usd"] += amt
+                o["booked"] += amt
+            for d in unpaid_deals_smb:
+                o = smb_owners.setdefault(d.get("deal_owner") or "—", {
+                    "paid_n": 0, "unpaid_n": 0, "cancelled_n": 0,
+                    "booked": 0.0, "paid_usd": 0.0, "pending_usd": 0.0, "cancelled_usd": 0.0,
+                })
+                amt = float(d.get("amount_usd") or 0)
+                if d.get("is_cancelled"):
+                    o["cancelled_n"] += 1
+                    o["cancelled_usd"] += amt
+                    # Do NOT add to booked or pending — cancellation removes from achievement
+                else:
+                    o["unpaid_n"] += 1
+                    o["booked"] += amt
+                    o["pending_usd"] += amt
+
+            # ---- Build owner → official rep figure lookup -------------------------
+            # The breakdown table uses official rep totals from `reps[]` (rounded to whole
+            # dollar) for Booked Amount and Payment Received columns. This makes individual
+            # rows + total reconcile to the same numbers the rest of the page shows (e.g.
+            # Lawrence Lewis $73,236 from rounding $73,235.50, team total $425,934).
+            # Pending stays as the deal-level sum because that's what the user verifies
+            # against deal-by-deal.
+            _smb_rep_lookup: dict[str, dict] = {}
+            for r in (pinned.get("reps") or []):
+                _smb_rep_lookup[(r.get("name") or "").strip().lower()] = r
+            # Aliases — deal_owner names that differ from rep names.
+            _smb_owner_alias = {
+                "yogesh vig": "yogi",
+            }
+            def _smb_normalize_owner(owner_raw: str) -> str:
+                """Strip '(Deactivated User)' and map aliases (Yogesh Vig → Yogi)."""
+                base = (owner_raw or "").replace(" (Deactivated User)", "").strip().lower()
+                return _smb_owner_alias.get(base, base)
+
+            st.markdown("#### Deal owner breakdown")
+            st.caption("Per-rep summary of SMB deals closed in Q1 — Total deals, Payment received vs not received, Booked Amount, $ received and $ pending. Booked Amount and $ Payment received use the official rep totals from the JSON (rounded to whole dollars).")
+            smb_owner_rows: list[str] = []
+            s_total = s_paid = s_unpaid = 0
+            s_booked_official = s_paid_official = 0.0
+            s_pending_usd = 0.0
+            for owner, o in sorted(smb_owners.items(), key=lambda kv: (-(kv[1]["paid_n"] + kv[1]["unpaid_n"]), kv[0])):
+                tot = o["paid_n"] + o["unpaid_n"]
+                s_total += tot
+                s_paid += o["paid_n"]
+                s_unpaid += o["unpaid_n"]
+                s_pending_usd += o["pending_usd"]
+                # Resolve official rep figure for this owner if available
+                rep_entry = _smb_rep_lookup.get(_smb_normalize_owner(owner))
+                if rep_entry:
+                    booked_display = round(float(rep_entry.get("achievement_usd") or 0))
+                    paid_display = float(rep_entry.get("payment_received_usd") or 0)
+                else:
+                    booked_display = o["booked"]
+                    paid_display = o["paid_usd"]
+                s_booked_official += booked_display
+                s_paid_official += paid_display
+                smb_owner_rows.append(
+                    "<tr>"
+                    f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;'><strong>{html_module.escape(owner)}</strong></td>"
+                    f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>{tot}</td>"
+                    f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#166534;'><strong>{o['paid_n']}</strong></td>"
+                    f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#991b1b;'><strong>{o['unpaid_n']}</strong></td>"
+                    f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>${booked_display:,.2f}</td>"
+                    f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#166534;'>${paid_display:,.2f}</td>"
+                    f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;color:#991b1b;'>${o['pending_usd']:,.2f}</td>"
+                    "</tr>"
+                )
+            # Total row uses official team_achievement_usd and team_payment_received_usd
+            _official_team_booked = float(pinned.get("team_achievement_usd") or s_booked_official)
+            _official_team_paid = float((pinned.get("manager_incentive") or {}).get("team_payment_received_usd") or s_paid_official)
+            smb_owner_rows.append(
+                "<tr style='background:#fef9c3;font-weight:700;'>"
+                f"<td style='padding:10px 12px;'>Total (SMB team)</td>"
+                f"<td style='padding:10px 12px;text-align:right;'>{s_total}</td>"
+                f"<td style='padding:10px 12px;text-align:right;color:#166534;'>{s_paid}</td>"
+                f"<td style='padding:10px 12px;text-align:right;color:#991b1b;'>{s_unpaid}</td>"
+                f"<td style='padding:10px 12px;text-align:right;'>${_official_team_booked:,.2f}</td>"
+                f"<td style='padding:10px 12px;text-align:right;color:#14532d;'>${_official_team_paid:,.2f}</td>"
+                f"<td style='padding:10px 12px;text-align:right;color:#7f1d1d;'>${s_pending_usd:,.2f}</td>"
+                "</tr>"
+            )
+            st.markdown(
+                "<div style='width:100%;overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;margin-top:6px;margin-bottom:18px;'>"
+                "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+                "<thead><tr style='background:#e0f2fe;color:#075985;'>"
+                "<th style='text-align:left;padding:10px 12px;font-weight:600;'>Deal Owner</th>"
+                "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Total deals</th>"
+                "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Payment received deals</th>"
+                "<th style='text-align:right;padding:10px 12px;font-weight:600;'># Payment not received</th>"
+                "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Booked Amount</th>"
+                "<th style='text-align:right;padding:10px 12px;font-weight:600;'>$ Payment received</th>"
+                "<th style='text-align:right;padding:10px 12px;font-weight:600;'>$ Payment Pending</th>"
+                f"</tr></thead><tbody>{''.join(smb_owner_rows)}</tbody></table></div>",
+                unsafe_allow_html=True,
+            )
+
+            # ---- Per-owner expander with Excel export ----
+            with st.expander("📋 See every SMB deal grouped by owner", expanded=False):
+                smb_owner_to_paid: dict[str, list[dict]] = {}
+                smb_owner_to_unpaid: dict[str, list[dict]] = {}
+                for d in paid_deals_smb:
+                    smb_owner_to_paid.setdefault(d.get("deal_owner") or "—", []).append(d)
+                for d in unpaid_deals_smb:
+                    smb_owner_to_unpaid.setdefault(d.get("deal_owner") or "—", []).append(d)
+
+                # Excel export — all rows with Amount + Payment Receipt
+                import pandas as _pd
+                _smb_xls_rows: list[dict] = []
+                for owner in sorted(set(list(smb_owner_to_paid.keys()) + list(smb_owner_to_unpaid.keys()))):
+                    for d in smb_owner_to_paid.get(owner, []):
+                        _smb_xls_rows.append({
+                            "Deal Owner": owner,
+                            "Deal": d.get("deal_name") or "",
+                            "Close date": d.get("close_date") or "",
+                            "Status": d.get("payment_status") or "Paid",
+                            "Amount (USD)": float(d.get("amount_usd") or 0),
+                            "Payment Receipt Amount (USD)": float(d.get("amount_usd") or 0),
+                            "Pending (USD)": 0.0,
+                        })
+                    for d in smb_owner_to_unpaid.get(owner, []):
+                        _smb_xls_rows.append({
+                            "Deal Owner": owner,
+                            "Deal": d.get("deal_name") or "",
+                            "Close date": d.get("close_date") or "",
+                            "Status": d.get("payment_status") or "Not Paid",
+                            "Amount (USD)": float(d.get("amount_usd") or 0),
+                            "Payment Receipt Amount (USD)": 0.0,
+                            "Pending (USD)": float(d.get("amount_usd") or 0),
+                        })
+                try:
+                    _smb_xls = _pinned_export_to_excel_bytes({"All SMB deals by owner": _pd.DataFrame(_smb_xls_rows)})
+                    st.download_button(
+                        label="📥 Export all SMB deals grouped by owner (Excel)",
+                        data=_smb_xls,
+                        file_name=f"smb_q{quarter}_{year}_deals_by_owner.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_smb_deals_by_owner_xlsx",
+                    )
+                except Exception:
+                    pass
+
+                grand_amount = 0.0
+                grand_paid = 0.0
+                grand_n = 0
+                for owner in sorted(set(list(smb_owner_to_paid.keys()) + list(smb_owner_to_unpaid.keys()))):
+                    p_list = smb_owner_to_paid.get(owner, [])
+                    u_list = smb_owner_to_unpaid.get(owner, [])
+                    # Split unpaid into "cancelled" vs "still pending"
+                    u_non_cancelled = [d for d in u_list if not d.get("is_cancelled")]
+                    u_cancelled = [d for d in u_list if d.get("is_cancelled")]
+                    p_sum = sum(float(d.get("amount_usd") or 0) for d in p_list)
+                    u_sum = sum(float(d.get("amount_usd") or 0) for d in u_non_cancelled)
+                    cancelled_sum_o = sum(float(d.get("amount_usd") or 0) for d in u_cancelled)
+                    # Owner Booked Amount excludes cancelled deals (they no longer count in achievement)
+                    owner_booked = p_sum + u_sum
+                    # Effective deal count: paid + non-cancelled unpaid (cancelled deals don't count)
+                    deal_n_effective = len(p_list) + len(u_non_cancelled)
+                    deal_n_with_cancelled = len(p_list) + len(u_list)  # used for headline only
+                    grand_amount += owner_booked
+                    grand_paid += p_sum
+                    grand_n += deal_n_effective
+                    received_chip = f"<span style='color:#166534;font-size:13px;font-weight:500;'>· ${p_sum:,.2f} received</span>"
+                    not_received_chip = (
+                        f" <span style='color:#991b1b;font-size:13px;font-weight:500;'>· ${u_sum:,.2f} not received</span>"
+                        if u_sum > 0 else ""
+                    )
+                    cancelled_chip = (
+                        f" <span style='color:#78350f;font-size:13px;font-weight:500;'>· ${cancelled_sum_o:,.2f} cancelled</span>"
+                        if cancelled_sum_o > 0 else ""
+                    )
+                    st.markdown(
+                        f"<div style='margin-top:14px;margin-bottom:6px;font-size:18px;font-weight:700;color:#0f172a;'>"
+                        f"{html_module.escape(owner)} — {deal_n_effective} deal(s) {received_chip}{not_received_chip}{cancelled_chip}"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+                    rows_h: list[str] = []
+                    for d in p_list:
+                        dn = html_module.escape((d.get("deal_name") or "").strip())
+                        amt = float(d.get("amount_usd") or 0)
+                        cd = html_module.escape((d.get("close_date") or "").strip())
+                        rows_h.append(
+                            f"<tr style='background:#f0fdf4;'>"
+                            f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;'><strong>{dn}</strong></td>"
+                            f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;text-align:right;'>{cd}</td>"
+                            f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;text-align:right;color:#166534;'>Paid</td>"
+                            f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;text-align:right;'><strong>${amt:,.2f}</strong></td>"
+                            f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;text-align:right;color:#166534;'><strong>${amt:,.2f}</strong></td>"
+                            "</tr>"
+                        )
+                    for d in u_list:
+                        dn = html_module.escape((d.get("deal_name") or "").strip())
+                        amt = float(d.get("amount_usd") or 0)
+                        cd = html_module.escape((d.get("close_date") or "").strip())
+                        status = html_module.escape((d.get("payment_status") or "Not Paid").strip())
+                        is_cancelled_d = bool(d.get("is_cancelled"))
+                        if is_cancelled_d:
+                            bg, border, badge_color = "#fef3c7", "#fde68a", "#78350f"
+                            amount_display = f"<s>${amt:,.2f}</s>"
+                            paid_display = "$0.00 (cancelled)"
+                        else:
+                            bg, border, badge_color = "#fef2f2", "#fecaca", "#b91c1c"
+                            amount_display = f"${amt:,.2f}"
+                            paid_display = "$0.00"
+                        rows_h.append(
+                            f"<tr style='background:{bg};'>"
+                            f"<td style='padding:8px 12px;border-bottom:1px solid {border};'><strong>{dn}</strong></td>"
+                            f"<td style='padding:8px 12px;border-bottom:1px solid {border};text-align:right;'>{cd}</td>"
+                            f"<td style='padding:8px 12px;border-bottom:1px solid {border};text-align:right;color:{badge_color};'>{status}</td>"
+                            f"<td style='padding:8px 12px;border-bottom:1px solid {border};text-align:right;'><strong>{amount_display}</strong></td>"
+                            f"<td style='padding:8px 12px;border-bottom:1px solid {border};text-align:right;color:{badge_color};'><strong>{paid_display}</strong></td>"
+                            "</tr>"
+                        )
+                    # Owner total row (Booked Amount excludes cancelled deals)
+                    rows_h.append(
+                        "<tr style='background:#fef9c3;font-weight:700;'>"
+                        f"<td style='padding:10px 12px;' colspan='2'>Total — {html_module.escape(owner)} ({deal_n_effective} deal{'s' if deal_n_effective != 1 else ''})"
+                        + (f" <span style='color:#78350f;font-size:11px;font-weight:500;'>(excludes ${cancelled_sum_o:,.2f} cancelled)</span>" if cancelled_sum_o else "")
+                        + "</td>"
+                        f"<td style='padding:10px 12px;text-align:right;'></td>"
+                        f"<td style='padding:10px 12px;text-align:right;'>${owner_booked:,.2f}</td>"
+                        f"<td style='padding:10px 12px;text-align:right;color:#166534;'>${p_sum:,.2f}</td>"
+                        "</tr>"
+                    )
+                    st.markdown(
+                        "<div style='width:100%;overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:14px;'>"
+                        "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+                        "<thead><tr style='background:#f1f5f9;color:#334155;'>"
+                        "<th style='text-align:left;padding:8px 12px;font-weight:600;'>Deal</th>"
+                        "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Close date</th>"
+                        "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Status</th>"
+                        "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Amount</th>"
+                        "<th style='text-align:right;padding:8px 12px;font-weight:600;'>Payment Receipt Amount</th>"
+                        f"</tr></thead><tbody>{''.join(rows_h)}</tbody></table></div>",
+                        unsafe_allow_html=True,
+                    )
+
+                # Grand total — use official figures from JSON where available so the
+                # headline reconciles cleanly with the rep totals (avoids $1 deal-level rounding).
+                official_total_booked = float(pinned.get("team_achievement_usd") or grand_amount)
+                official_total_paid = float((pinned.get("manager_incentive") or {}).get("team_payment_received_usd") or grand_paid)
+                # Pending sums directly from the deal-level data (no double-rounding).
+                grand_pending = sum(
+                    float(d.get("amount_usd") or 0)
+                    for d in unpaid_deals_smb
+                    if not d.get("is_cancelled")
+                )
+                st.markdown(
+                    "<div style='margin-top:6px;padding:14px 16px;background:#fef3c7;border:2px solid #f59e0b;border-radius:10px;'>"
+                    "<div style='font-size:13px;font-weight:700;color:#78350f;text-transform:uppercase;letter-spacing:0.5px;'>🏷️ Grand total — SMB team (all owners)</div>"
+                    "<div style='display:grid;grid-template-columns:repeat(4, 1fr);gap:12px;margin-top:8px;'>"
+                    f"<div><div style='font-size:11px;color:#92400e;'>Total deals</div><div style='font-size:20px;font-weight:700;color:#78350f;'>{grand_n}</div></div>"
+                    f"<div><div style='font-size:11px;color:#92400e;'>Total Amount</div><div style='font-size:20px;font-weight:700;color:#78350f;'>${official_total_booked:,.2f}</div></div>"
+                    f"<div><div style='font-size:11px;color:#92400e;'>Payment Receipt</div><div style='font-size:20px;font-weight:700;color:#166534;'>${official_total_paid:,.2f}</div></div>"
+                    f"<div><div style='font-size:11px;color:#92400e;'>Pending</div><div style='font-size:20px;font-weight:700;color:#991b1b;'>${grand_pending:,.2f}</div></div>"
+                    "</div>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("---")
 
         comm_block = pinned.get("commission") or {}
         if comm_block:
@@ -4551,6 +7778,364 @@ def _render_account_management_goal_attainment() -> None:
     st.markdown("".join(parts), unsafe_allow_html=True)
 
 
+def _render_ent_quarterly_pinned(pinned: dict) -> None:
+    """Render the ENT Q1 2026 (or any pinned ENT quarter): bullet bars + commission summary.
+
+    User-level filtering: SALES_REPs see only their own row/deals. ADMIN and SALES_MANAGER see full team.
+    """
+    _current_user = st.session_state.get("user") if hasattr(st, "session_state") else None
+    _user_matchers = _get_user_rep_name_matchers(_current_user)
+    if _user_matchers:
+        pinned = _filter_pinned_for_user(pinned, _current_user)
+        st.info(
+            f"🔒 **Personal view** — showing only your data for Q{pinned.get('quarter')} FY{pinned.get('year')}. "
+            "Team totals are shown for context."
+        )
+    year = pinned.get("year")
+    quarter = pinned.get("quarter")
+    team_target = float(pinned.get("team_target_usd") or 0)
+    reps_top = pinned.get("reps") or []
+    team_achievement = float(pinned.get("team_achievement_usd") or sum(float(r.get("achievement_usd") or 0) for r in reps_top))
+    team_paid = float(pinned.get("team_payment_received_usd") or sum(float(r.get("payment_received_usd") or 0) for r in reps_top))
+    team_pct = (team_achievement / team_target * 100.0) if team_target else 0.0
+    comm = pinned.get("commission") or {}
+    try:
+        inr_rate = float(comm.get("exchange_rate_inr_per_usd") or 0)
+    except (TypeError, ValueError):
+        inr_rate = 0.0
+
+    st.markdown(f"### Q{quarter} {year} — Enterprise Sales Target")
+    st.caption(f"Pinned values — read from `policy/ent_q{quarter}_{year}_fixed.json`.")
+
+    # ---- KPI cards ----
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Team target", f"${team_target:,.0f}")
+    k2.metric("Achieved (booked)", f"${team_achievement:,.0f}", f"{team_pct:.1f}%")
+    k3.metric("Payment received", f"${team_paid:,.0f}")
+    k4.metric("Eligibility floor", f"{int(comm.get('eligibility_min_pct') or 0)}%")
+
+    # ---- Deal-count strip (paid + unpaid → total closed) ----
+    _paid_deals_top = pinned.get("paid_deals") or []
+    _unpaid_deals_top = pinned.get("unpaid_deals_overrides") or []
+    _paid_count = len(_paid_deals_top)
+    _unpaid_count = len(_unpaid_deals_top)
+    _closed_count = _paid_count + _unpaid_count
+    _paid_sum_top = sum(float(p.get("amount_usd") or 0) for p in _paid_deals_top)
+    _unpaid_sum_top = sum(float(u.get("amount_usd") or 0) for u in _unpaid_deals_top)
+    if _closed_count > 0:
+        st.markdown(
+            "<div style='display:grid;grid-template-columns:repeat(3, 1fr);gap:12px;margin-top:14px;'>"
+            # Card 1 — Total closed
+            "<div style='background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:14px 16px;'>"
+            "<div style='font-size:12px;font-weight:600;color:#3730a3;text-transform:uppercase;letter-spacing:0.5px;'>📦 Total deals closed</div>"
+            f"<div style='font-size:32px;font-weight:700;color:#1e3a8a;margin-top:4px;'>{_closed_count}</div>"
+            f"<div style='font-size:12px;color:#475569;margin-top:2px;'>Combined value: ${(_paid_sum_top + _unpaid_sum_top):,.2f}</div>"
+            "</div>"
+            # Card 2 — Payment received
+            "<div style='background:#ecfdf5;border:1px solid #86efac;border-radius:10px;padding:14px 16px;'>"
+            "<div style='font-size:12px;font-weight:600;color:#166534;text-transform:uppercase;letter-spacing:0.5px;'>✅ Payment received</div>"
+            f"<div style='font-size:32px;font-weight:700;color:#14532d;margin-top:4px;'>{_paid_count} <span style='font-size:16px;font-weight:500;'>deal(s)</span></div>"
+            f"<div style='font-size:12px;color:#166534;margin-top:2px;'>Total: ${_paid_sum_top:,.2f}</div>"
+            "</div>"
+            # Card 3 — Payment NOT received
+            "<div style='background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;padding:14px 16px;'>"
+            "<div style='font-size:12px;font-weight:600;color:#991b1b;text-transform:uppercase;letter-spacing:0.5px;'>❌ Payment not received</div>"
+            f"<div style='font-size:32px;font-weight:700;color:#7f1d1d;margin-top:4px;'>{_unpaid_count} <span style='font-size:16px;font-weight:500;'>deal(s)</span></div>"
+            f"<div style='font-size:12px;color:#991b1b;margin-top:2px;'>Excluded value: ${_unpaid_sum_top:,.2f}</div>"
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+    if (comm.get("eligibility_text") or "").strip():
+        st.caption(comm.get("eligibility_text"))
+    st.markdown("---")
+
+    # ---- Bullet bars ----
+    parts: list[str] = [
+        '<div class="goal-attainment-wrap">',
+        '<div class="ga-bullet-section">',
+        '<p class="ga-bullet-section-title">Performance vs goal</p>',
+    ]
+    for r in reps_top:
+        nm = (r.get("name") or "").strip()
+        ach = float(r.get("achievement_usd") or 0)
+        tgt = float(r.get("target_usd") or 0)
+        av = f'<div class="ga-avatar" aria-hidden="true">{html_module.escape(_initials_for_avatar(nm))}</div>'
+        parts.append(
+            _bullet_chart_row_html(nm, f"Individual target · Q{quarter} {year}", ach, tgt, initials_html=av)
+        )
+    parts.append(
+        _bullet_chart_row_html(
+            "Enterprise team",
+            f"Q{quarter} {year} total",
+            team_achievement,
+            team_target,
+        )
+    )
+    parts.extend(["</div>", "</div>"])
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+    # ---- Paid deals table ----
+    paid_deals = pinned.get("paid_deals") or []
+    if paid_deals:
+        paid_total = sum(float(p.get("amount_usd") or 0) for p in paid_deals)
+        paid_html_rows: list[str] = []
+        for p in paid_deals:
+            dn = html_module.escape((p.get("deal_name") or "").strip())
+            amt = float(p.get("amount_usd") or 0)
+            cd = html_module.escape((p.get("close_date") or "").strip())
+            owner = html_module.escape((p.get("deal_owner") or "").strip())
+            paid_html_rows.append(
+                f"<tr style='background:#f0fdf4;'>"
+                f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;'><strong>{dn}</strong></td>"
+                f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;'>{owner}</td>"
+                f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;text-align:right;'>{cd}</td>"
+                f"<td style='padding:8px 12px;border-bottom:1px solid #bbf7d0;text-align:right;color:#166534;'><strong>${amt:,.2f}</strong></td>"
+                f"</tr>"
+            )
+        # Total row at the bottom
+        paid_html_rows.append(
+            f"<tr style='background:#bbf7d0;font-weight:700;'>"
+            f"<td style='padding:10px 12px;'>Total Payment Received</td>"
+            f"<td style='padding:10px 12px;'></td>"
+            f"<td style='padding:10px 12px;'></td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#14532d;'>${paid_total:,.2f}</td>"
+            f"</tr>"
+        )
+        st.markdown(
+            "<div style='margin:16px 0 8px 0;padding:12px 14px;background:#ecfdf5;border:1px solid #86efac;border-radius:8px;color:#14532d;'>"
+            f"<strong>✅ Paid Q1 deals (included in Payment Received):</strong> "
+            f"<strong>{len(paid_deals)} deal(s)</strong> totaling "
+            f"<strong>${paid_total:,.2f}</strong> — these are the Q1 deals whose payment was received at the time of the Q1 commission calculation."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<div style='width:100%;overflow-x:auto;border:1px solid #86efac;border-radius:8px;margin-bottom:18px;'>"
+            "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+            "<thead><tr style='background:#a7f3d0;color:#064e3b;'>"
+            "<th style='text-align:left;padding:10px 12px;font-weight:600;'>Deal Name</th>"
+            "<th style='text-align:left;padding:10px 12px;font-weight:600;'>Deal Owner</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Close date</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Payment Received</th>"
+            f"</tr></thead><tbody>{''.join(paid_html_rows)}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- Unpaid deals notice ----
+    unpaid = pinned.get("unpaid_deals_overrides") or []
+    if unpaid:
+        unpaid_total = sum(float(u.get("amount_usd") or 0) for u in unpaid)
+        unpaid_html_rows: list[str] = []
+        for u in unpaid:
+            dn = html_module.escape((u.get("deal_name") or "").strip())
+            amt = float(u.get("amount_usd") or 0)
+            cd = html_module.escape((u.get("close_date") or "").strip())
+            reason = html_module.escape((u.get("reason") or "").strip())
+            unpaid_html_rows.append(
+                f"<tr style='background:#fef2f2;'>"
+                f"<td style='padding:8px 12px;border-bottom:1px solid #fecaca;'><strong>{dn}</strong>"
+                + (f"<br/><span style='font-size:12px;color:#7f1d1d;'>{reason}</span>" if reason else "")
+                + "</td>"
+                f"<td style='padding:8px 12px;border-bottom:1px solid #fecaca;text-align:right;'>{cd}</td>"
+                f"<td style='padding:8px 12px;border-bottom:1px solid #fecaca;text-align:right;color:#b91c1c;'><strong>${amt:,.2f}</strong></td>"
+                f"</tr>"
+            )
+        # Total row at the bottom
+        unpaid_html_rows.append(
+            f"<tr style='background:#fee2e2;font-weight:700;'>"
+            f"<td style='padding:10px 12px;'>Total unpaid</td>"
+            f"<td style='padding:10px 12px;'></td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#991b1b;'>${unpaid_total:,.2f}</td>"
+            f"</tr>"
+        )
+        st.markdown(
+            "<div style='margin:16px 0 8px 0;padding:12px 14px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;'>"
+            f"<strong>📌 Unpaid deals (excluded from Payment Received):</strong> "
+            f"Total deal value <strong>${unpaid_total:,.2f}</strong>. "
+            "Commission is calculated on Payment Received ($453,168.40 − unpaid = $254,293.90)."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<div style='width:100%;overflow-x:auto;border:1px solid #fecaca;border-radius:8px;margin-bottom:18px;'>"
+            "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+            "<thead><tr style='background:#fecaca;color:#7f1d1d;'>"
+            "<th style='text-align:left;padding:10px 12px;font-weight:600;'>Deal</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Close date</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Amount</th>"
+            f"</tr></thead><tbody>{''.join(unpaid_html_rows)}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- Commission summary (mirrors SMB / AM Q1 layout) ----
+    comm_reps = comm.get("reps") or []
+    if comm_reps:
+        st.markdown("#### Commission summary")
+        st.caption("Commission is calculated on **Payment Received** at the ENT slab rate (0–75.99% → 7%).")
+        rows_html: list[str] = []
+        for c in comm_reps:
+            nm = (c.get("name") or "").strip()
+            grp = (c.get("group") or "").strip()
+            quota = float(c.get("quota_usd") or 0)
+            rev = float(c.get("revenue_achieved_usd") or 0)
+            paid = float(c.get("payment_received_usd") or 0)
+            ach_pct_v = float(c.get("eligible_pct") or 0)
+            slab_pct_v = float(c.get("slab_pct") or 0)
+            base = float(c.get("base_commission_usd") or 0)
+            payout = float(c.get("total_payout_usd") or 0)
+            payout_inr = round(payout * inr_rate, 2) if inr_rate else 0
+            note = (c.get("note") or "").strip()
+            rows_html.append(
+                "<tr>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;'><strong>{html_module.escape(nm)}</strong></td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;'>{html_module.escape(grp)}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>${quota:,.2f}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>${rev:,.2f}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>${paid:,.2f}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>{ach_pct_v:.0f}%</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>{slab_pct_v:.0f}%</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>${base:,.2f}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;text-align:right;'>"
+                f"<strong>${payout:,.2f}</strong>"
+                + (f"<br/><span style='font-size:11px;color:#6b7280;'>≈ ₹{payout_inr:,.0f}</span>" if inr_rate else "")
+                + "</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #f1f1ef;font-size:12px;color:#475569;min-width:360px;'>{html_module.escape(note)}</td>"
+                "</tr>"
+            )
+        st.markdown(
+            "<div style='width:100%;overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;'>"
+            "<table style='border-collapse:collapse;font-size:13px;width:max-content;min-width:100%;'>"
+            "<thead><tr style='background:#f3e8ff;color:#5b21b6;'>"
+            "<th style='text-align:left;padding:10px 12px;font-weight:600;'>Rep. Name</th>"
+            "<th style='text-align:left;padding:10px 12px;font-weight:600;'>Group</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Quota</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Revenue Achieved</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Payment Received</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Achieved %</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Slab %</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Base Commission</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:600;'>Total Payout</th>"
+            "<th style='text-align:left;padding:10px 12px;font-weight:600;'>Note</th>"
+            f"</tr></thead><tbody>{''.join(rows_html)}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- Pending commissions (Q4 deals paid in Q1) ----
+    mgr_inc = pinned.get("manager_incentive") or {}
+    pending = mgr_inc.get("pending_commissions") or []
+    if pending:
+        pending_total = float(mgr_inc.get("total_pending_commission_usd") or sum(float(p.get("commission_usd") or 0) for p in pending))
+        rows_h: list[str] = []
+        for p in pending:
+            dn = html_module.escape((p.get("deal_name") or "").strip())
+            per = html_module.escape((p.get("period") or "").strip())
+            deal_amt = float(p.get("deal_amount_usd") or 0)
+            rate = float(p.get("rate_pct") or 0)
+            comm = float(p.get("commission_usd") or 0)
+            note = html_module.escape((p.get("note") or "").strip())
+            rows_h.append(
+                "<tr style='background:#ecfdf5;'>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #a7f3d0;'><strong>{dn}</strong>"
+                + (f"<br/><span style='font-size:12px;color:#14532d;'>{note}</span>" if note else "")
+                + "</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #a7f3d0;text-align:right;'>{per}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #a7f3d0;text-align:right;'>${deal_amt:,.2f}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #a7f3d0;text-align:right;'>{rate:g}%</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #a7f3d0;text-align:right;color:#14532d;'><strong>+${comm:,.2f}</strong></td>"
+                "</tr>"
+            )
+        rows_h.append(
+            f"<tr style='background:#bbf7d0;font-weight:700;'>"
+            f"<td colspan='4' style='padding:10px 12px;'>Total pending commission</td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#14532d;'>+${pending_total:,.2f}</td>"
+            "</tr>"
+        )
+        st.markdown("#### Pending commissions (Q4 deals paid in Q1)")
+        st.caption("Q4 FY2025 deals whose payment was received in Q1 2026. Commission is paid at the Q4 rate (10%).")
+        st.markdown(
+            "<div style='width:100%;overflow-x:auto;border:1px solid #86efac;border-radius:8px;margin-bottom:18px;'>"
+            "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+            "<thead><tr style='background:#a7f3d0;color:#064e3b;'>"
+            "<th style='text-align:left;padding:10px 12px;font-weight:700;'>Deal Name</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:700;'>Period</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:700;'>Paid Amount</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:700;'>Q4 Rate</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:700;'>Commission</th>"
+            f"</tr></thead><tbody>{''.join(rows_h)}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- Refunds / Clawbacks (Q4 cancelled deals) ----
+    clawbacks = mgr_inc.get("clawbacks") or []
+    if clawbacks:
+        cb_total = float(mgr_inc.get("total_clawback_usd") or sum(float(c.get("deduction_usd") or 0) for c in clawbacks))
+        cb_rows: list[str] = []
+        for cb in clawbacks:
+            lbl = html_module.escape((cb.get("label") or "").strip())
+            per = html_module.escape((cb.get("period") or "").strip())
+            refund_amt = float(cb.get("deal_amount_usd") or 0)
+            rate = float(cb.get("rate_pct") or 0)
+            ded = float(cb.get("deduction_usd") or 0)
+            note = html_module.escape((cb.get("note") or "").strip())
+            cb_rows.append(
+                "<tr style='background:#fff1f2;'>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #fecdd3;'><strong>{lbl}</strong>"
+                + (f"<br/><span style='font-size:12px;color:#7f1d1d;'>{note}</span>" if note else "")
+                + "</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #fecdd3;text-align:right;'>{per}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #fecdd3;text-align:right;'>${refund_amt:,.2f}</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #fecdd3;text-align:right;'>{rate:g}%</td>"
+                f"<td style='padding:10px 12px;border-bottom:1px solid #fecdd3;text-align:right;color:#b91c1c;'><strong>${ded:,.2f}</strong></td>"
+                "</tr>"
+            )
+        cb_rows.append(
+            f"<tr style='background:#fee2e2;font-weight:700;'>"
+            f"<td colspan='4' style='padding:10px 12px;'>Total commission to deduct</td>"
+            f"<td style='padding:10px 12px;text-align:right;color:#991b1b;'>${cb_total:,.2f}</td>"
+            "</tr>"
+        )
+        st.markdown("#### Refunds / cancelled Q4 deals (commission to deduct)")
+        st.caption("Q4 FY2025 deals that were later cancelled / refunded. The previously-paid commission is clawed back.")
+        st.markdown(
+            "<div style='width:100%;overflow-x:auto;border:2px solid #fecaca;border-radius:8px;margin-bottom:18px;'>"
+            "<table style='border-collapse:collapse;font-size:13px;width:100%;'>"
+            "<thead><tr style='background:#fecaca;color:#7f1d1d;'>"
+            "<th style='text-align:left;padding:10px 12px;font-weight:700;'>Deal Name</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:700;'>Period</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:700;'>Refund Amount</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:700;'>Q4 Rate</th>"
+            "<th style='text-align:right;padding:10px 12px;font-weight:700;'>Commission to deduct</th>"
+            f"</tr></thead><tbody>{''.join(cb_rows)}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- Final payout banner ----
+    final_amt = float(mgr_inc.get("final_payout_usd") or 0)
+    if final_amt > 0:
+        final_inr = round(final_amt * inr_rate, 2) if inr_rate else 0
+        st.markdown("#### Final payout")
+        inr_suffix = (
+            f"<div style='font-size:14px;font-weight:500;color:#166534;margin-top:4px;'>≈ ₹{final_inr:,.0f} (INR @ ₹{inr_rate:g}/USD)</div>"
+            if inr_rate
+            else ""
+        )
+        st.markdown(
+            f"<div style='background:#bbf7d0;border:1px solid #4ade80;border-radius:8px;padding:14px 18px;color:#14532d;'>"
+            f"<div style='font-size:18px;font-weight:700;'>Total Q{quarter} FY{year} Payout: ${final_amt:,.2f}</div>"
+            f"{inr_suffix}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        calc_note = (mgr_inc.get("calculation_note") or "").strip()
+        if calc_note:
+            st.caption("Calculation: " + calc_note.replace("$", "\\$"))
+
+    # ---- Inline chat assistant ----
+    render_pinned_chat_assistant(pinned, session_prefix="ent_q1")
+
+
 def _render_enterprise_goal_attainment() -> None:
     """Enterprise: optional Anthony snapshot (policy) + bullet charts vs team goal + **hubspot_quota_usd** per rep."""
     from commission_policy import (
@@ -4570,6 +8155,17 @@ def _render_enterprise_goal_attainment() -> None:
     users = get_all_users_with_teams()
 
     start_d, end_d, range_label, year, quarter = _close_date_picker("ga_ent", default_preset="Last quarter")
+
+    # If the selected range matches a quarter for which ENT has a pinned file, render
+    # the bullet bars from that file and skip the live DB aggregation.
+    _yr_pick = int(start_d.year)
+    _qt_pick = _quarter_of_month(int(start_d.month))
+    _qs, _qe = _quarter_start_end(_yr_pick, _qt_pick)
+    if start_d == _qs and end_d == _qe:
+        ent_q_pinned = _load_pinned_quarter("ent", _yr_pick, _qt_pick)
+        if ent_q_pinned is not None:
+            _render_ent_quarterly_pinned(ent_q_pinned)
+            return
 
     period_labels = _quarter_month_labels(year, quarter)
     quota_period = period_labels[0]
@@ -5521,14 +9117,12 @@ def render_login():
                 user = authenticate(email.strip(), password)
                 if user:
                     st.session_state.user = user
-                    st.session_state.play_welcome_voice = True
                     log_audit("LOGIN", "user", performed_by=user["user_id"], entity_id=str(user["user_id"]))
                     st.rerun()
                 else:
                     st.error("Invalid email or password")
 
-    # Voice message button (TTS)
-    components.html(_login_voice_html(), height=70)
+    # Voice message removed per request — no TTS button on the login page either.
 
 
 def render_branding_and_settings(user: dict) -> None:
@@ -5713,7 +9307,6 @@ def render_manager_incentive_admin(user_id: int, team_filter: str, key_prefix: s
         "incentive_percentage",
         "incentive_amount",
         "Payout note",
-        "calculation_period",
     ]
     show = [c for c in cols if c in df.columns]
     base_df = df[show] if show else df
@@ -5817,8 +9410,11 @@ def render_admin_dashboard():
                 "**Performance vs goal**, **HubSpot**, and **Excel** use tabs: **SMB**, **Account Management**, and **Enterprise**."
             )
             render_upload_section(user_id, sales_target_team="SMB")
-            st.divider()
-            render_uploads_list(user_id, admin=True)
+            # Uploads list is hidden — Q1 2026 data is locked. Re-enable with
+            # COMP_TOOL_ENABLE_IMPORTS=1 in .env when imports are needed again.
+            if (os.environ.get("COMP_TOOL_ENABLE_IMPORTS") or "").strip() in ("1", "true", "yes"):
+                st.divider()
+                render_uploads_list(user_id, admin=True)
         return
     if nav == "Outbound":
         with st.container(border=True):
@@ -5848,8 +9444,11 @@ def render_admin_dashboard():
         with st.container():
             with st.container(border=True):
                 render_upload_section(user_id, sales_target_team=tf_label)
-                st.divider()
-                render_uploads_list(user_id, admin=True)
+                # Uploads list is hidden — Q1 2026 data is locked. Re-enable with
+                # COMP_TOOL_ENABLE_IMPORTS=1 in .env when imports are needed again.
+                if (os.environ.get("COMP_TOOL_ENABLE_IMPORTS") or "").strip() in ("1", "true", "yes"):
+                    st.divider()
+                    render_uploads_list(user_id, admin=True)
             st.divider()
             t_mgr, t_team = st.tabs(
                 ["Manager incentive", "Team view"]
@@ -5891,8 +9490,18 @@ def render_admin_dashboard():
                                     handled = True
 
                     if not handled:
-                        st.caption(f"Team goals and manager incentives — **{tf_label}**.")
-                        render_manager_incentive_admin(user_id, tf_label, kp)
+                        # ENT does not have a separate manager incentive — Anthony is the only person on the team.
+                        # His full commission (base + Q4 pending + Q4 refund clawback) is shown on the Sales Target page.
+                        if nav == "ENT":
+                            st.info(
+                                "ℹ️ **No separate manager incentive for the Enterprise team.** "
+                                "Anthony Raymond is the only person on the ENT team. His complete commission breakdown "
+                                "— base commission, Q4 pending deals, and refund clawback — is displayed on the **Enterprise Sales Target** tab. "
+                                "There is no additional manager-pool incentive."
+                            )
+                        else:
+                            st.caption(f"Team goals and manager incentives — **{tf_label}**.")
+                            render_manager_incentive_admin(user_id, tf_label, kp)
             with t_team:
                 with st.container(border=True):
                     pinned_for_team = None
@@ -6175,6 +9784,84 @@ def render_member_dashboard():
     user_id = user["user_id"]
     role = user.get("role", "")
     team_id = user.get("team_id")
+    team_name = (user.get("team_name") or "").strip()
+
+    # ---- My Sales Target: filtered pinned Q1 / April / May view for the current user ----
+    if nav == "My Sales Target":
+        with st.container(border=True):
+            # Auto-detect the user's team by matching their name against the pinned JSON
+            # rep lists. This works even if user.team_name isn't set correctly.
+            _matchers = _get_user_rep_name_matchers(user) or []
+            _detected_team = None  # "smb" | "am" | "ent"
+
+            def _user_in_pinned(pinned: dict | None) -> bool:
+                if not pinned or not _matchers:
+                    return False
+                # Check reps + paid_deals + unpaid_deals_overrides
+                for r in (pinned.get("reps") or []):
+                    if _rep_name_matches_user(r.get("name") or "", _matchers):
+                        return True
+                for d in (pinned.get("paid_deals") or []):
+                    if _rep_name_matches_user(d.get("deal_owner") or "", _matchers):
+                        return True
+                for d in (pinned.get("unpaid_deals_overrides") or []):
+                    if _rep_name_matches_user(d.get("deal_owner") or "", _matchers):
+                        return True
+                # Also check if the user is the manager
+                mgr_name = (pinned.get("manager_incentive") or {}).get("manager_name") or ""
+                if _rep_name_matches_user(mgr_name, _matchers):
+                    return True
+                return False
+
+            # Try SMB (Q1 → April → May), then AM, then ENT.
+            for team_prefix, team_key in (("smb", "smb"), ("am", "am"), ("ent", "ent")):
+                # Q1 pinned
+                q_pinned = _load_pinned_smb_quarter(2026, 1) if team_prefix == "smb" else (
+                    _load_pinned_am_quarter(2026, 1) if team_prefix == "am" else None
+                )
+                if _user_in_pinned(q_pinned):
+                    _detected_team = team_key
+                    break
+                # Monthly
+                for _mo in (4, 5):
+                    m_pinned = _load_pinned_monthly(team_prefix, 2026, _mo)
+                    if _user_in_pinned(m_pinned):
+                        _detected_team = team_key
+                        break
+                if _detected_team:
+                    break
+
+            # Fallback to user.team_name if we couldn't auto-detect from pinned files.
+            if not _detected_team:
+                from commission_policy import ACCOUNT_MANAGEMENT_TEAM_NAME, ENTERPRISE_TEAM_NAME, SMB_TEAM_NAME
+                _team_low = (team_name or "").lower()
+                if team_name == SMB_TEAM_NAME or _team_low == "smb":
+                    _detected_team = "smb"
+                elif team_name == ACCOUNT_MANAGEMENT_TEAM_NAME or "account" in _team_low or _team_low == "am":
+                    _detected_team = "am"
+                elif team_name == ENTERPRISE_TEAM_NAME or "enterprise" in _team_low or _team_low == "ent":
+                    _detected_team = "ent"
+
+            if _detected_team == "smb":
+                st.markdown("### My SMB Sales Target")
+                _render_smb_goal_attainment_table()
+            elif _detected_team == "am":
+                st.markdown("### My Account Management Sales Target")
+                _render_account_management_goal_attainment()
+            elif _detected_team == "ent":
+                st.markdown("### My Enterprise Sales Target")
+                _render_enterprise_goal_attainment()
+            else:
+                st.info(
+                    f"Your team ({team_name or 'unknown'}) is not currently set up with pinned Sales Target data. "
+                    "Please contact your administrator to assign you to the SMB, Account Management, or Enterprise roster."
+                )
+                st.caption(
+                    f"Debug: logged-in user = {user.get('full_name') or user.get('email') or user.get('user_id')}, "
+                    f"role = {user.get('role')}, team_name = {team_name!r}. "
+                    f"Name matchers used for detection: {_matchers or '(none — no full_name set)'}."
+                )
+        return
 
     # Rep incentives (own) — with graphical view and deal names for reps
     st.subheader("My Rep Incentives")
@@ -6415,6 +10102,36 @@ def render_upload_section(user_id: int, sales_target_team: str = "SMB"):
             else:
                 st.markdown("### Enterprise Sales Target")
                 _render_enterprise_goal_attainment()
+
+            # ---------------------------------------------------------------
+            # Q1 2026 data is LOCKED — the HubSpot import / Excel upload UI is
+            # disabled because Q1 payouts have already been processed and
+            # re-fetching from HubSpot would not reflect the correct cycle
+            # cutoffs (some deals' payments only arrived in later quarters).
+            # All sales-target numbers come from the pinned JSON files in
+            # `policy/*_q1_2026_fixed.json`. To re-enable the import UI for a
+            # future quarter, set the env var `COMP_TOOL_ENABLE_IMPORTS=1`.
+            # ---------------------------------------------------------------
+            _imports_enabled = (os.environ.get("COMP_TOOL_ENABLE_IMPORTS") or "").strip() in ("1", "true", "yes")
+            if not _imports_enabled:
+                st.divider()
+                st.markdown(
+                    "<div style='margin-top:8px;padding:14px 18px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;'>"
+                    "<div style='font-size:13px;font-weight:700;color:#3730a3;text-transform:uppercase;letter-spacing:0.5px;'>🔒 Q1 2026 data is locked</div>"
+                    f"<div style='font-size:13px;color:#1e3a8a;margin-top:6px;'>"
+                    f"Q1 payouts have already been processed. The {_ctx_label} sales target above is read from the pinned JSON file "
+                    f"(<code>policy/{ctx}_q1_2026_fixed.json</code>). "
+                    "HubSpot fetch and Excel upload are intentionally disabled here because re-fetching wouldn't reflect the correct Q1 payment-received cutoff — "
+                    "some Closed Won deals' payments only arrived in later quarters and are tracked separately as pending."
+                    "</div>"
+                    "<div style='font-size:12px;color:#475569;margin-top:8px;'>"
+                    "To update Q1 numbers, edit the pinned JSON file directly. To re-enable the import UI for a future quarter, set "
+                    "<code>COMP_TOOL_ENABLE_IMPORTS=1</code> in <code>.env</code>."
+                    "</div>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                continue
 
             st.divider()
             st.markdown("### Connect to HubSpot (fetch deals)")
@@ -7456,6 +11173,7 @@ _ADMIN_SIDEBAR_RAIL_ITEMS: tuple[tuple[str, str, str], ...] = (
 
 _MEMBER_SIDEBAR_RAIL_ITEMS: tuple[tuple[str, str, str], ...] = (
     ("Rules & Policy", "Policy", "📜"),
+    ("My Sales Target", "Target", "📊"),
     ("My report", "Report", "📋"),
 )
 
@@ -7537,10 +11255,7 @@ def main():
     user = st.session_state.user
     st.markdown(_dashboard_theme_css(), unsafe_allow_html=True)
 
-    # Play welcome voice once after Sign In (Sara female voice)
-    if st.session_state.get("play_welcome_voice"):
-        components.html(_login_voice_html(autoplay=True), height=1)
-        st.session_state.play_welcome_voice = False
+    # Welcome voice removed per request — no audio plays after sign-in.
 
     if user.get("role") == "ADMIN":
         render_admin_sidebar_rail()

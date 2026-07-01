@@ -349,6 +349,27 @@ def team_commission_pct_from_achievement(achievement_pct: float) -> float:
     return 0.0
 
 
+def ent_team_commission_pct_from_achievement(achievement_pct: float) -> float:
+    """ENT-specific manager incentive % — uses the Enterprise rep tier bands.
+
+    Per the Enterprise policy:
+      • 0% – 75.99%   → 7%
+      • 76% – 100%    → 9%
+      • 101% – 125%   → 11%
+      • 126%+         → 13%
+    Minimum achievement for ENT commission is 0% (any positive revenue qualifies).
+    """
+    x = float(achievement_pct or 0)
+    if x >= 126:
+        return 13.0
+    if x >= 101:
+        return 11.0
+    if x >= 76:
+        return 9.0
+    # Any achievement below 76% (including 0) lands in the 0–75.99% band.
+    return 7.0
+
+
 def policy_config_path_resolved() -> str:
     """Absolute path to the JSON policy file in use (for UI / debugging)."""
     return str(_policy_json_path().resolve())

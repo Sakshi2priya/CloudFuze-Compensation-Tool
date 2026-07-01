@@ -1,0 +1,91 @@
+{
+  "_comment": "Pinned AM May 2026 monthly compensation. Team target $100,000 (Joy $40k + Arundhati $35k + Deepak $25k). Team achievement $15,405 (15.4%) — well below the 60% manager-team floor, so Joy earns no base manager commission for May. Deepak joined the AM team mid-May (May quota $25k). Vivin remains off the roster (left the org in April).",
+  "period_type": "monthly",
+  "year": 2026,
+  "month": 5,
+  "month_label": "May 2026",
+  "team_target_usd": 100000,
+  "team_achievement_usd": 15405,
+  "monthly_tiers": {
+    "min_achievement_pct_for_commission": 60,
+    "individual_tiers": [
+      { "min_pct": 0,   "max_pct": 60,   "commission_pct": 0 },
+      { "min_pct": 60,  "max_pct": 75,   "commission_pct": 2 },
+      { "min_pct": 76,  "max_pct": 99,   "commission_pct": 3 },
+      { "min_pct": 100, "max_pct": 125,  "commission_pct": 5 },
+      { "min_pct": 126, "max_pct": 150,  "commission_pct": 6 },
+      { "min_pct": 151, "max_pct": null, "commission_pct": 8 }
+    ],
+    "manager_tiers": [
+      { "min_pct": 60,  "max_pct": 80,   "commission_pct": 2 },
+      { "min_pct": 81,  "max_pct": 99,   "commission_pct": 3 },
+      { "min_pct": 100, "max_pct": null, "commission_pct": 4 }
+    ],
+    "manager_team_minimum_pct": 60,
+    "manage_deal_pct_am_only": 5
+  },
+  "reps": [
+    {
+      "name": "Joy",
+      "target_usd": 40000,
+      "achievement_usd": 9176.0,
+      "payment_received_usd": 6800.0,
+      "is_manager": true,
+      "manager_role_note": "Joy is the AM manager. Her individual achievement ($9,176 booked / $6,800 received across 4 May deals) contributes to the overall team performance. However, her commission is calculated on the team's performance using the manager tier bands (60-80% → 2%, 81-99% → 3%, 100%+ → 4%) — not on her individual sales."
+    },
+    {
+      "name": "Arundhati Sen",
+      "target_usd": 35000,
+      "achievement_usd": 6229.0,
+      "payment_received_usd": 6229.0
+    },
+    {
+      "name": "Deepak",
+      "target_usd": 25000,
+      "achievement_usd": 0.0,
+      "payment_received_usd": 0.0,
+      "joined_note": "Deepak joined the AM team mid-May 2026. His May quota is $25,000."
+    }
+  ],
+
+  "paid_deals": [
+    { "deal_name": "Infoblox - Upsell", "deal_owner": "Joy Prakash", "amount_usd": 3000, "close_date": "2026-05-20", "payment_status": "Paid" },
+    { "deal_name": "SKYTIDE GROUP - New Deal - Server Overage", "deal_owner": "Arundhati Sen", "amount_usd": 500, "close_date": "2026-05-19", "payment_status": "Paid" },
+    { "deal_name": "Michigan Economic Development Co. - Overage - Box to MS365", "deal_owner": "Joy Prakash", "amount_usd": 1350, "close_date": "2026-05-12", "payment_status": "Paid" },
+    { "deal_name": "ezCater - New Deal - Google Drive to OneDrive / SharePoint", "deal_owner": "Arundhati Sen", "amount_usd": 2500, "close_date": "2026-05-11", "payment_status": "Paid" },
+    { "deal_name": "SLR Consulting - Existing Customer - Server Overage", "deal_owner": "Joy Prakash", "amount_usd": 2450, "close_date": "2026-05-12", "payment_status": "Paid" },
+    { "deal_name": "BeWell, New Mexico's Health Insurance Marketplace - New Deal - ShareFile to SharePoint Migration", "deal_owner": "Arundhati Sen", "amount_usd": 3229, "close_date": "2026-05-21", "payment_status": "Paid" }
+  ],
+
+  "unpaid_deals_overrides": [
+    { "deal_name": "SLR Consulting - Slack to Teams - NEW Project", "deal_owner": "Joy Prakash", "amount_usd": 2376, "close_date": "2026-05-26", "payment_status": "Not Paid", "reason": "Payment not received at the time of May commission calculation." }
+  ],
+
+  "deals_summary": {
+    "total_deals_closed": 7,
+    "deals_payment_received": 6,
+    "deals_payment_not_received": 1,
+    "note": "7 deals closed in May 2026 for the AM team. 6 had payment received ($13,029 total) and 1 (SLR Consulting - Slack to Teams - NEW Project, Joy Prakash, $2,376) had no payment received at the time of May commission calculation."
+  },
+
+  "commission": {
+    "exchange_rate_inr_per_usd": 86,
+    "eligibility_min_pct": 60,
+    "eligibility_text": "Monthly plan: a minimum of 60% achievement of the individual quota is required for commission. Below 60% → 0% slab. Managed-deal incentive: 5% on managed deals (AM team only).",
+    "reps": []
+  },
+
+  "manager_incentive": {
+    "manager_name": "Joy",
+    "team_label": "Account Management",
+    "manager_team_minimum_pct": 60,
+    "rules_note": "Manager commission applies only if the team achieves a minimum of 60% of the monthly target. May team achievement is 15.4% ($15,405 / $100,000), which is well below the 60% floor → Joy earns no base manager commission for May 2026.",
+    "team_target_usd": 100000,
+    "team_achievement_usd": 15405,
+    "team_achievement_pct": 15,
+    "team_payment_received_usd": 13029,
+    "manager_q1_amount_usd": 0,
+    "final_payout_usd": 0,
+    "calculation_note": "Team achievement 15.4% is below the 60% manager-team floor → base manager commission = $0 for May 2026."
+  }
+}

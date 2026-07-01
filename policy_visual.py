@@ -299,6 +299,31 @@ def _mandatory_commission_rules_html(min_pct: float, *, microsoft_google_license
     )
 
 
+def _manage_deal_requirement_html() -> str:
+    """Q1 Manage Deal Requirement — shared rule for SMB & AM Q1 policy pages."""
+    return (
+        "<div style='margin:22px 0 8px 0;padding:14px 18px;background:#fef3c7;border:1px solid #fcd34d;border-radius:10px;'>"
+        "<p style='margin:0 0 8px 0;font-weight:800;color:#92400e;font-size:14px;letter-spacing:.02em;'>"
+        "📌 Minimum Manage Deal Requirement"
+        "</p>"
+        "<p style='margin:0 0 10px 0;color:#78350f;line-height:1.6;'>"
+        "All Sales Representatives <em>(excluding POD Leaders)</em> are required to close a minimum of "
+        "<strong>two Manage Deals</strong> during the quarter. Failure to meet this requirement will result in a "
+        "<strong>10% deduction</strong> from the achieved commission payout."
+        "</p>"
+        "<p style='margin:0 0 8px 0;color:#78350f;line-height:1.6;'>"
+        "<strong>Applicability:</strong> This policy applies to all Sales Representatives <strong>except POD Leaders</strong>."
+        "</p>"
+        "<p style='margin:0 0 6px 0;color:#78350f;font-weight:700;'>Example:</p>"
+        "<ul style='margin:0 0 0 22px;padding:0;color:#78350f;line-height:1.7;'>"
+        "<li>✅ <strong>2 Manage Deals Closed</strong> = Additional <strong>$1,000</strong></li>"
+        "<li>✅ <strong>3 Manage Deals Closed</strong> = Additional <strong>$1,500</strong></li>"
+        "<li>⚠️ <strong>Less than 2 Manage Deals Closed</strong> = <strong>10% deduction</strong> on achieved commission</li>"
+        "</ul>"
+        "</div>"
+    )
+
+
 def build_smb_inner_html() -> str:
     parts: list[str] = []
     tgt = float(cp.TEAM_QUARTERLY_TARGETS_USD.get(cp.SMB_TEAM_NAME, 0) or 0)
@@ -345,6 +370,8 @@ def build_smb_inner_html() -> str:
             rws.append([band, f"<strong>{pct:g}%</strong>"])
         parts.append(_html_table(["Closed revenue band (USD)", "Commission %"], rws, "#dbeafe"))
         parts.append(_mandatory_commission_rules_html(float(cp.MIN_INDIVIDUAL_QUOTA_ACHIEVEMENT_PCT)))
+    # Q1 Manage Deal Requirement (applies to all Sales Reps except POD Leaders).
+    parts.append(_manage_deal_requirement_html())
     return "".join(parts)
 
 
@@ -383,6 +410,8 @@ def build_am_inner_html() -> str:
             microsoft_google_license=True,
         )
     )
+    # Q1 Manage Deal Requirement (applies to all Sales Reps except POD Leaders).
+    parts.append(_manage_deal_requirement_html())
     return "".join(parts)
 
 
@@ -411,18 +440,15 @@ def build_ent_inner_html() -> str:
 
 
 def build_outbound_inner_html() -> str:
-    """Outbound Team: eligibility, geography, who qualifies, how payouts are recorded (matches Admin → Outbound)."""
+    """Outbound Team: monthly meeting incentives + lead meeting requirements."""
     parts: list[str] = []
-    parts.append(
-        f"<p style='margin-top:0;'><strong>{_esc(cp.OUTBOUND_POLICY_LABEL)}</strong> — outbound meeting incentives.</p>"
-    )
 
     payout_rows = [
         [_esc(r.get("meetings", "")), _esc(r.get("payout", ""))] for r in (cp.OUTBOUND_MEETING_PAYOUT_ROWS or [])
     ]
     if payout_rows:
         parts.append(
-            f"<p style='margin:18px 0 8px 0;font-weight:800;color:#c2410c;'>{_esc(cp.OUTBOUND_MEETING_PAYOUT_TITLE)}</p>"
+            f"<p style='margin:0 0 8px 0;font-weight:800;color:#c2410c;'>{_esc(cp.OUTBOUND_MEETING_PAYOUT_TITLE)}</p>"
             + _html_table(["Meetings (count)", "Payout"], payout_rows, "#ffedd5")
         )
         if (cp.OUTBOUND_MEETING_PAYOUT_NOTE or "").strip():
@@ -430,7 +456,168 @@ def build_outbound_inner_html() -> str:
                 f"<p style='font-size:.9rem;color:#57534e;margin:10px 0 4px 0;line-height:1.5;'>{_esc(cp.OUTBOUND_MEETING_PAYOUT_NOTE)}</p>"
             )
 
+    # Outbound Lead Meeting Requirement (Incentive Eligibility / No-Show / Validation)
+    parts.append(
+        "<div style='margin:22px 0 6px 0;padding:14px 18px;background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;'>"
+        "<p style='margin:0 0 8px 0;font-weight:800;color:#9a3412;font-size:14px;letter-spacing:.02em;'>"
+        "📌 Outbound Lead Meeting Requirement"
+        "</p>"
+        "<p style='margin:0 0 10px 0;color:#7c2d12;line-height:1.6;'>"
+        "Once a lead is assigned by the Outbound Team to a Sales Representative, the scheduled meeting "
+        "<strong>must be conducted by the assigned Sales Representative</strong>."
+        "</p>"
+        "<ul style='margin:0 0 0 22px;padding:0;color:#7c2d12;line-height:1.75;'>"
+        "<li><strong>Incentive Eligibility:</strong> Incentives will be paid only for meetings that are "
+        "<strong>successfully attended and completed</strong> with the prospect.</li>"
+        "<li><strong>No-Show Policy:</strong> If the meeting starts but the prospect/customer does not join, "
+        "the meeting <strong>will not qualify</strong> for an incentive payout.</li>"
+        "<li><strong>Meeting Validation:</strong> Only completed meetings with actual prospect participation "
+        "will be considered for incentive calculation.</li>"
+        "</ul>"
+        "</div>"
+    )
+
     return "".join(parts)
+
+
+def _build_monthly_plan_html(only_team: str | None = None) -> str:
+    """Internal helper — build the Monthly Plan policy HTML, optionally filtered to one team.
+
+    ``only_team`` accepts ``"smb"``, ``"am"``, or ``None`` (both — original behavior).
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    parts: list[str] = []
+    if only_team == "smb":
+        parts.append(
+            "<p style='margin-top:0;'><strong>SMB — Monthly Compensation Policy 2026</strong> "
+            "(applies from April 2026 onwards).</p>"
+        )
+    elif only_team == "am":
+        parts.append(
+            "<p style='margin-top:0;'><strong>Account Management — Monthly Compensation Policy 2026</strong> "
+            "(applies from April 2026 onwards).</p>"
+        )
+    else:
+        parts.append(
+            "<p style='margin-top:0;'><strong>Sales Commission Policy 2026 — Monthly Plan</strong> "
+            "(applies to SMB and Account Management). Quarterly plan above remains in force for quarter-level reporting; "
+            "this section governs month-level payouts.</p>"
+        )
+
+    smb_path = _Path(__file__).parent / "policy" / "smb_april_2026_fixed.json"
+    am_path = _Path(__file__).parent / "policy" / "am_april_2026_fixed.json"
+    smb_data: dict = {}
+    am_data: dict = {}
+    try:
+        if smb_path.exists():
+            smb_data = _json.loads(smb_path.read_text(encoding="utf-8"))
+    except Exception:
+        smb_data = {}
+    try:
+        if am_path.exists():
+            am_data = _json.loads(am_path.read_text(encoding="utf-8"))
+    except Exception:
+        am_data = {}
+
+    # --- SMB Monthly Quotas table ---
+    if only_team in (None, "smb"):
+        smb_reps = smb_data.get("reps") or []
+        if smb_reps:
+            rows = [[_esc(r.get("name", "")), f"<strong>{_fmt_money(float(r.get('target_usd') or 0))}</strong>"] for r in smb_reps]
+            smb_total = sum(float(r.get("target_usd") or 0) for r in smb_reps)
+            rows.append(["<strong>Total</strong>", f"<strong>{_fmt_money(smb_total)}</strong>"])
+            parts.append(
+                "<p style='margin:14px 0 6px 0;font-weight:700;color:#0f766e;'>SMB Team — Monthly Quotas</p>"
+                + _html_table(["Rep", "April 2026"], rows, "#ccfbf1")
+            )
+
+    # --- AM Monthly Quotas table ---
+    if only_team in (None, "am"):
+        am_reps = am_data.get("reps") or []
+        if am_reps:
+            rows = [[_esc(r.get("name", "")), f"<strong>{_fmt_money(float(r.get('target_usd') or 0))}</strong>"] for r in am_reps]
+            am_total = sum(float(r.get("target_usd") or 0) for r in am_reps)
+            rows.append(["<strong>Total</strong>", f"<strong>{_fmt_money(am_total)}</strong>"])
+            parts.append(
+                "<p style='margin:14px 0 6px 0;font-weight:700;color:#0f766e;'>Account Management Team — Monthly Quotas</p>"
+                + _html_table(["Rep", "April 2026"], rows, "#ccfbf1")
+            )
+
+    # --- Individual rep commission tiers (same for both teams) ---
+    tiers = (smb_data.get("monthly_tiers") or am_data.get("monthly_tiers") or {})
+    ind_tiers = tiers.get("individual_tiers") or []
+    if ind_tiers:
+        ind_rows = []
+        for t in ind_tiers:
+            lo = t.get("min_pct")
+            hi = t.get("max_pct")
+            if hi is None:
+                band = f"<strong>{lo}%+</strong>"
+            elif lo == 0:
+                band = "<strong>&lt; 59.9%</strong>"
+            else:
+                band = f"<strong>{lo}–{hi}%</strong>"
+            ind_rows.append([band, f"<strong>{t.get('commission_pct', 0)}%</strong>"])
+        parts.append(
+            "<p style='margin:18px 0 6px 0;font-weight:700;color:#0f766e;'>Individual rep commission</p>"
+            + _html_table(["% of Quota", "Commission %"], ind_rows, "#ccfbf1")
+        )
+
+    # --- Manager commission tiers ---
+    mgr_tiers = tiers.get("manager_tiers") or []
+    if mgr_tiers:
+        mgr_rows = []
+        for t in mgr_tiers:
+            lo = t.get("min_pct")
+            hi = t.get("max_pct")
+            band = f"<strong>{lo}–{hi}%</strong>" if hi is not None else f"<strong>{lo}%+</strong>"
+            mgr_rows.append([band, f"<strong>{t.get('commission_pct', 0)}%</strong>"])
+        parts.append(
+            "<p style='margin:18px 0 6px 0;font-weight:700;color:#0f766e;'>Manager commission</p>"
+            + _html_table(["Team Achievement %", "Commission %"], mgr_rows, "#ccfbf1")
+        )
+
+    # --- Special rules ---
+    min_ach = tiers.get("min_achievement_pct_for_commission") or 60
+    mgr_min = tiers.get("manager_team_minimum_pct") or 60
+    md_pct = tiers.get("manage_deal_pct_am_only") or 5
+
+    # Tailor the managed-deal bullet per team.
+    if only_team == "smb":
+        md_bullet = ""
+    elif only_team == "am":
+        md_bullet = (
+            f"<li><strong>Managed-deal incentive:</strong> {md_pct}% on managed deals — "
+            f"<strong>AM team only</strong>.</li>"
+        )
+    else:
+        md_bullet = (
+            f"<li><strong>Managed-deal incentive:</strong> {md_pct}% on managed deals — "
+            f"<strong>AM team only</strong>.</li>"
+        )
+
+    parts.append(
+        "<p style='margin:18px 0 6px 0;font-weight:700;color:#0f766e;'>Special rules</p>"
+        "<ul style='margin:4px 0 0 18px;padding:0;line-height:1.65;'>"
+        f"<li>Individual reps below <strong>59.9%</strong> of quota earn <strong>0%</strong> commission.</li>"
+        f"{md_bullet}"
+        f"<li><strong>Manager commission</strong> applies only if the team achieves at least <strong>{int(mgr_min)}%</strong> of the monthly target (no manager commission below {int(mgr_min)}%).</li>"
+        "</ul>"
+    )
+
+    return "".join(parts)
+
+
+def build_smb_monthly_only_html() -> str:
+    """Monthly plan for SMB only — no AM quotas or AM-only rules."""
+    return _build_monthly_plan_html(only_team="smb")
+
+
+def build_am_monthly_only_html() -> str:
+    """Monthly plan for AM only — no SMB quotas; keeps the AM-only 5% managed-deal rule."""
+    return _build_monthly_plan_html(only_team="am")
 
 
 def build_monthly_plan_inner_html() -> str:
@@ -574,52 +761,343 @@ def render_extracted_bucket_column(team_key: str, title: str, lines: list[str]) 
     )
 
 
-def render_commission_policy_page(pdf_path: Path | None, key_prefix: str) -> None:
-    """Main Rules & Policy hub: structured rules + file extraction + optional reference PDF."""
-    st.markdown(_policy_hub_nav_css(), unsafe_allow_html=True)
-    st.markdown(_policy_hub_header_html(), unsafe_allow_html=True)
+def _policy_overview_css() -> str:
+    return """
+    <style>
+    .pol-page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin:4px 0 16px;}
+    .pol-page-head h2{margin:0;font-size:24px;color:#1e3a8a;letter-spacing:.01em;}
+    .pol-page-head .pol-sub{margin-top:4px;color:#64748b;font-size:13px;}
+    .pol-howitworks{background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:14px 18px;min-width:340px;max-width:440px;color:#1e3a8a;font-size:13px;line-height:1.55;}
+    .pol-howitworks-title{font-weight:600;color:#1d4ed8;margin-bottom:6px;display:flex;align-items:center;gap:6px;}
+    .pol-howitworks ul{margin:4px 0 0 18px;padding:0;}
+    .pol-row-card{background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;padding:18px 20px;margin-bottom:14px;box-shadow:0 1px 2px rgba(15,23,42,.04);}
+    .pol-row-team{display:flex;align-items:center;gap:10px;font-size:17px;font-weight:600;color:#0f172a;margin-bottom:10px;}
+    .pol-team-icon{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;color:#fff;font-size:18px;}
+    .pol-team-icon-smb{background:#10b981;}
+    .pol-team-icon-am{background:#3b82f6;}
+    .pol-team-icon-ent{background:#7c3aed;}
+    .pol-team-icon-ob{background:#f97316;}
+    .pol-period-label{font-weight:600;color:#475569;letter-spacing:.04em;font-size:13px;text-align:center;}
+    .pol-period-sub{font-size:12px;color:#64748b;text-align:center;margin-top:2px;}
+    .pol-months{display:flex;gap:6px;justify-content:center;margin-top:10px;flex-wrap:wrap;}
+    .pol-month-chip{padding:6px 12px;border-radius:8px;font-size:11px;font-weight:600;letter-spacing:.05em;}
+    .pol-month-chip-q{background:#ede9fe;color:#5b21b6;border:1px solid #c4b5fd;}
+    .pol-month-chip-m{background:#dcfce7;color:#166534;border:1px solid #86efac;}
+    .pol-policy-label{margin-top:10px;text-align:center;font-size:12px;color:#475569;display:flex;align-items:center;justify-content:center;gap:5px;}
+    .pol-policy-label-q{color:#5b21b6;}
+    .pol-policy-label-m{color:#15803d;}
+    .pol-action-head{text-align:center;font-size:13px;font-weight:600;color:#475569;margin-bottom:8px;}
+    .pol-note{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:14px 18px;color:#475569;font-size:13px;line-height:1.55;margin-top:18px;}
+    .pol-note-title{font-weight:600;color:#334155;display:flex;align-items:center;gap:6px;margin-bottom:4px;}
+    /* Detail page styles */
+    .pol-badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;letter-spacing:.02em;}
+    .pol-badge-monthly{background:#dcfce7;color:#166534;border:1px solid #86efac;}
+    .pol-badge-quarterly{background:#ede9fe;color:#5b21b6;border:1px solid #c4b5fd;}
+    </style>
+    """
 
-    _seg_key = f"{key_prefix}_policy_seg"
-    view = st.segmented_control(
-        "Policy sections",
-        options=["structured", "file", "ref"],
-        format_func=lambda k: {
-            "structured": "Structured rules (by team)",
-            "file": "Extract from uploaded file",
-            "ref": "Reference document",
-        }[k],
-        default="structured",
-        key=_seg_key,
-        width="stretch",
-        help="Switch between structured JSON-backed rules, optional file text extraction, and the on-disk PDF.",
+
+def _render_policy_overview(state_key: str) -> None:
+    """Landing page for the Policy module — horizontal team cards with months + actions."""
+    st.markdown(_policy_overview_css(), unsafe_allow_html=True)
+
+    # --- Page header + "How it works" info box ---
+    st.markdown(
+        "<div class='pol-page-head'>"
+        "<div>"
+        "<h2>Policy Overview</h2>"
+        "<div class='pol-sub'>Understand compensation policy frequency by team and period.</div>"
+        "</div>"
+        "<div class='pol-howitworks'>"
+        "<div class='pol-howitworks-title'>ⓘ How it works</div>"
+        "<ul>"
+        "<li><strong>Q1 (Jan – Mar):</strong> Quarterly policy for SMB, AM, ENT. <strong>Outbound is monthly year-round.</strong></li>"
+        "<li><strong>From April onwards:</strong> Monthly for SMB &amp; AM, Quarterly for ENT, Monthly for Outbound</li>"
+        "</ul>"
+        "</div>"
+        "</div>",
+        unsafe_allow_html=True,
     )
-    active = view if view is not None else "structured"
 
+    teams = [
+        # (team_key, icon_emoji, icon_css_class, team_name, route_prefix, april_label, q1_label)
+        ("smb", "👥", "smb", "SMB Team", "smb", "Monthly", "Quarterly"),
+        ("am", "📊", "am", "AM Team", "am", "Monthly", "Quarterly"),
+        ("ent", "🏛", "ent", "ENT Team", "ent", "Quarterly", "Quarterly"),
+        # Outbound is monthly-only year-round — no quarterly variant exists.
+        ("ob", "📣", "ob", "Outbound Team", "outbound", "Monthly", "Monthly"),
+    ]
+
+    # User-level filter: SALES_REPs see only their own team's policy card.
+    # ADMIN and SALES_MANAGER see all cards.
+    _current_user = st.session_state.get("user") if hasattr(st, "session_state") else None
+    if _current_user and (_current_user.get("role") or "").upper() == "SALES_REP":
+        # Detect the user's team by matching their name against known rep rosters.
+        _full_name = (_current_user.get("full_name") or "").strip().lower()
+        _first_name = (_full_name.split() or [""])[0]
+        # Known team rosters (short names / aliases) — mirror the app-level matchers.
+        _smb_reps = {"vicky", "yogi", "yogesh", "kritika", "lawrence", "larry", "royston", "kartik", "deepak", "rutuja", "lennis", "chitradip", "chit"}
+        _am_reps = {"joy", "vivin", "arundhati", "nikita"}
+        _ent_reps = {"anthony"}
+
+        _user_team_key = None
+        for tok in (_first_name, _full_name):
+            if tok in _smb_reps or any(k in tok for k in _smb_reps):
+                _user_team_key = "smb"
+                break
+            if tok in _am_reps or any(k in tok for k in _am_reps):
+                _user_team_key = "am"
+                break
+            if tok in _ent_reps or any(k in tok for k in _ent_reps):
+                _user_team_key = "ent"
+                break
+
+        # Fallback: use user.team_name if we couldn't auto-detect
+        if not _user_team_key:
+            _tn = (_current_user.get("team_name") or "").lower()
+            if "smb" in _tn:
+                _user_team_key = "smb"
+            elif "account" in _tn or "am" == _tn.strip():
+                _user_team_key = "am"
+            elif "enterprise" in _tn or "ent" in _tn:
+                _user_team_key = "ent"
+
+        if _user_team_key:
+            teams = [t for t in teams if t[0] == _user_team_key]
+            st.caption(
+                f"🔒 Personal view — showing only the {teams[0][3] if teams else _user_team_key.upper()} policy relevant to you."
+            )
+
+    q1_months = ("JAN", "FEB", "MAR")
+    april_onwards_months = ("APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+
+    for team_key, icon_emoji, icon_class, team_name, route_prefix, april_label, q1_label in teams:
+        with st.container():
+            # Open the card div via markdown
+            st.markdown(
+                f"<div class='pol-row-card'>"
+                f"<div class='pol-row-team'>"
+                f"<span class='pol-team-icon pol-team-icon-{icon_class}'>{icon_emoji}</span>"
+                f"<span>{team_name}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            # 3 sections + actions column
+            col_team_pad, col_q1, col_april, col_actions = st.columns([0.5, 2.5, 3.5, 1.2])
+
+            q1_chip_class = "pol-month-chip-m" if q1_label == "Monthly" else "pol-month-chip-q"
+            q1_label_class = "pol-policy-label-m" if q1_label == "Monthly" else "pol-policy-label-q"
+
+            with col_q1:
+                q1_chips_html = "".join(
+                    f"<span class='pol-month-chip {q1_chip_class}'>{m}</span>" for m in q1_months
+                )
+                st.markdown(
+                    f"<div class='pol-period-label'>Q1 (JAN – MAR)</div>"
+                    f"<div class='pol-period-sub'>{q1_label} policy for {team_name}</div>"
+                    f"<div class='pol-months'>{q1_chips_html}</div>"
+                    f"<div class='pol-policy-label {q1_label_class}'>📅 {q1_label} Policy</div>",
+                    unsafe_allow_html=True,
+                )
+
+            with col_april:
+                chip_class = "pol-month-chip-m" if april_label == "Monthly" else "pol-month-chip-q"
+                label_class = "pol-policy-label-m" if april_label == "Monthly" else "pol-policy-label-q"
+                april_chips_html = "".join(
+                    f"<span class='pol-month-chip {chip_class}'>{m}</span>" for m in april_onwards_months
+                )
+                policy_text = f"{april_label} policy from April onwards"
+                st.markdown(
+                    f"<div class='pol-period-label'>FROM APRIL ONWARDS</div>"
+                    f"<div class='pol-period-sub'>{policy_text}</div>"
+                    f"<div class='pol-months'>{april_chips_html}</div>"
+                    f"<div class='pol-policy-label {label_class}'>📅 {april_label} Policy</div>",
+                    unsafe_allow_html=True,
+                )
+
+            with col_actions:
+                st.markdown("<div class='pol-action-head'>Action</div>", unsafe_allow_html=True)
+                # Outbound is monthly-only — no quarterly button.
+                if route_prefix != "outbound":
+                    if st.button(
+                        "View Quarterly  ›",
+                        key=f"{state_key}_btn_{route_prefix}_q",
+                        use_container_width=True,
+                    ):
+                        st.session_state[state_key] = f"{route_prefix}_quarterly"
+                        st.rerun()
+                # ENT has no separate monthly view (current policy = quarterly = same as Q1).
+                if april_label == "Monthly":
+                    if st.button(
+                        "View Monthly  ›",
+                        key=f"{state_key}_btn_{route_prefix}_m",
+                        use_container_width=True,
+                    ):
+                        st.session_state[state_key] = f"{route_prefix}_monthly"
+                        st.rerun()
+
+            # Close the card div
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    # Note at the bottom
+    st.markdown(
+        "<div class='pol-note'>"
+        "<div class='pol-note-title'>ⓘ Note</div>"
+        "Policy frequency may change as per business decisions. Any updates will be communicated in advance."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Tucked-away advanced link
+    st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+    with st.expander("⚙ Advanced — file extraction & reference PDF"):
+        if st.button("Open advanced view", key=f"{state_key}_btn_adv"):
+            st.session_state[state_key] = "advanced"
+            st.rerun()
+
+
+def _render_policy_detail(state_key: str, title: str, subtitle: str, body_html: str, badge_label: str) -> None:
+    """Detail page wrapper: back button + heading + body.
+
+    If ``subtitle`` is empty/None, the subtitle line (and its badge) is hidden completely.
+    """
+    st.markdown(_policy_overview_css(), unsafe_allow_html=True)
+    if st.button("← Back to Policy Overview", key=f"{state_key}_back_btn"):
+        st.session_state[state_key] = "overview"
+        st.rerun()
+    badge_class = "pol-badge-monthly" if badge_label == "Monthly" else "pol-badge-quarterly"
+    subtitle_html = ""
+    if (subtitle or "").strip():
+        subtitle_html = (
+            f"<div style='margin-top:6px;color:#64748b;font-size:13px;'>{_esc(subtitle)} &nbsp;"
+            f"<span class='pol-badge {badge_class}' style='margin-left:6px;'>{_esc(badge_label)}</span></div>"
+        )
+    st.markdown(
+        f"<div style='margin-top:14px;margin-bottom:10px;'>"
+        f"<h2 style='margin:0;font-size:22px;color:#1e3a8a;'>{_esc(title)}</h2>"
+        f"{subtitle_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+    st.markdown(body_html, unsafe_allow_html=True)
+
+
+def render_commission_policy_page(pdf_path: Path | None, key_prefix: str) -> None:
+    """Policy Overview hub: 4-card landing page, each card navigates to a detailed policy page.
+
+    Q1 (Jan–Mar) is quarterly for all teams. From April onwards: SMB/AM/Outbound = monthly,
+    ENT = quarterly. Each card has two buttons — View Q1 Policy and View Current Policy —
+    which navigate to the corresponding detailed view.
+    """
+    state_key = f"{key_prefix}_policy_view"
+    view = st.session_state.get(state_key, "overview")
+
+    # ---- Overview (default landing) ----
+    if view == "overview":
+        _render_policy_overview(state_key)
+        return
+
+    # ---- SMB ----
+    if view == "smb_quarterly":
+        _render_policy_detail(
+            state_key,
+            "SMB Team — Q1 FY2026 Quarterly Policy",
+            "Applies January–March 2026 to the SMB team.",
+            build_smb_inner_html(),
+            "Quarterly",
+        )
+        return
+    if view == "smb_monthly":
+        _render_policy_detail(
+            state_key,
+            "SMB Team — Monthly Policy (April 2026 onwards)",
+            "Applies from April 2026 onwards to the SMB team.",
+            build_smb_monthly_only_html(),
+            "Monthly",
+        )
+        return
+
+    # ---- AM ----
+    if view == "am_quarterly":
+        _render_policy_detail(
+            state_key,
+            "AM Team — Q1 FY2026 Quarterly Policy",
+            "Applies January–March 2026 to the Account Management team.",
+            build_am_inner_html(),
+            "Quarterly",
+        )
+        return
+    if view == "am_monthly":
+        _render_policy_detail(
+            state_key,
+            "AM Team — Monthly Policy (April 2026 onwards)",
+            "Applies from April 2026 onwards to the Account Management team.",
+            build_am_monthly_only_html(),
+            "Monthly",
+        )
+        return
+
+    # ---- ENT (no monthly variant — stays quarterly) ----
+    if view in ("ent_quarterly", "ent_monthly"):
+        _render_policy_detail(
+            state_key,
+            "ENT Team — Quarterly Policy",
+            "Applies all year. ENT does not switch to monthly.",
+            build_ent_inner_html(),
+            "Quarterly",
+        )
+        return
+
+    # ---- Outbound (monthly-only year-round) ----
+    if view in ("outbound_monthly", "outbound_quarterly"):
+        _render_policy_detail(
+            state_key,
+            "Outbound Team — Monthly Policy",
+            "",
+            build_outbound_inner_html(),
+            "Monthly",
+        )
+        return
+
+    # ---- Advanced (legacy file extraction + reference PDF) ----
+    if view == "advanced":
+        _render_policy_advanced(pdf_path, key_prefix, state_key)
+        return
+
+    # Fallback
+    st.session_state[state_key] = "overview"
+    st.rerun()
+
+
+def _render_policy_advanced(pdf_path: Path | None, key_prefix: str, state_key: str) -> None:
+    """Legacy advanced view kept available behind a button from the overview page.
+
+    Provides PDF/PPTX text extraction and the on-disk reference policy document.
+    """
+    st.markdown(_policy_overview_css(), unsafe_allow_html=True)
+    if st.button("← Back to Policy Overview", key=f"{state_key}_adv_back"):
+        st.session_state[state_key] = "overview"
+        st.rerun()
+    st.markdown(
+        "<h2 style='margin-top:14px;font-size:22px;color:#1e3a8a;'>Advanced — Policy Extraction</h2>",
+        unsafe_allow_html=True,
+    )
+
+    _adv_seg_key = f"{key_prefix}_policy_adv_seg"
+    view = st.segmented_control(
+        "Advanced actions",
+        options=["file", "ref"],
+        format_func=lambda k: {"file": "Extract from uploaded file", "ref": "Reference document"}[k],
+        default="file",
+        key=_adv_seg_key,
+        width="stretch",
+    )
+    active = view if view is not None else "file"
     st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
-    if active == "structured":
-        st.markdown(
-            _team_wrap("SMB", "SMB TEAM", "SMB Team — reps & manager", build_smb_inner_html()),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            _team_wrap("AM", "AM TEAM", "AM Team", build_am_inner_html()),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            _team_wrap("ENT", "ENT TEAM", "ENT Team — enterprise tiers", build_ent_inner_html()),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            _team_wrap("OB", "OUTBOUND TEAM", "Outbound Team — meeting incentives", build_outbound_inner_html()),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            _team_wrap("MN", "MONTHLY PLAN", "Monthly Plan — SMB & Account Management (April 2026)", build_monthly_plan_inner_html()),
-            unsafe_allow_html=True,
-        )
-
-    elif active == "file":
+    if active == "file":
         st.subheader("Upload PDF or PowerPoint")
         st.caption(
             "This does **not** replace policy JSON. Text is extracted for reading only; incentive math always follows "

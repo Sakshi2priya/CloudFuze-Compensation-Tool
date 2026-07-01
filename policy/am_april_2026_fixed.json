@@ -88,6 +88,35 @@
       "payment_received_usd": 16879.0
     }
   ],
+
+  "paid_deals": [
+    { "deal_name": "Vatica Health - New Deal Existing Customer - Server Overage", "deal_owner": "Vivin Joseph (Deactivated User)", "amount_usd": 3000, "close_date": "2026-04-28", "payment_status": "Paid" },
+    { "deal_name": "Ampleo - New Deal - Professional Services", "deal_owner": "Arundhati Sen", "amount_usd": 800, "close_date": "2026-04-24", "payment_status": "Paid" },
+    { "deal_name": "PDF Solutions - Existing Customer Server Overage", "deal_owner": "Vivin Joseph (Deactivated User)", "amount_usd": 1000, "close_date": "2026-04-24", "payment_status": "Paid" },
+    { "deal_name": "Cerity Partners - New Deal - Additional Server", "deal_owner": "Arundhati Sen", "amount_usd": 2000, "close_date": "2026-04-21", "payment_status": "Paid" },
+    { "deal_name": "NerdsToGo | Carolina Contracting - New Deal - Overage", "deal_owner": "Arundhati Sen", "amount_usd": 900, "close_date": "2026-04-22", "payment_status": "Paid" },
+    { "deal_name": "TeamLogic IT - New Deal - TeamLogic IT of N. Milwaukee (Duet Resource Group) - New Deal - DropBox to OneDrive SharePoint - Server Overage", "deal_owner": "Vivin Joseph (Deactivated User)", "amount_usd": 500, "close_date": "2026-04-21", "payment_status": "Paid" },
+    { "deal_name": "Cerity Partners - New Deal - Teams T2T", "deal_owner": "Arundhati Sen", "amount_usd": 7860, "close_date": "2026-04-17", "payment_status": "Paid" },
+    { "deal_name": "Vendasta - Beyond Private Label - Existing Customer - Server Overage", "deal_owner": "Vivin Joseph (Deactivated User)", "amount_usd": 1000, "close_date": "2026-04-21", "payment_status": "Paid" },
+    { "deal_name": "Deel - Google to Google Content & Email", "deal_owner": "Joy Prakash", "amount_usd": 9776, "close_date": "2026-04-23", "payment_status": "Paid" },
+    { "deal_name": "Artnet - Upsell - MS to GW", "deal_owner": "Joy Prakash", "amount_usd": 3856, "close_date": "2026-04-14", "payment_status": "Paid" },
+    { "deal_name": "SLR Consulting - Existing Customer - Server overage", "deal_owner": "Vivin Joseph (Deactivated User)", "amount_usd": 2450, "close_date": "2026-04-06", "payment_status": "Paid" },
+    { "deal_name": "Future Range | Server Overage | Existing Customer", "deal_owner": "Vivin Joseph (Deactivated User)", "amount_usd": 1500, "close_date": "2026-04-01", "payment_status": "Paid" },
+    { "deal_name": "Tech Wizards - New Deal - GMail to Outlook - Existing customer Server Overage", "deal_owner": "Vivin Joseph (Deactivated User)", "amount_usd": 1000, "close_date": "2026-04-28", "payment_status": "Paid" },
+    { "deal_name": "Ground Score - New Deal - Gmail to Gmail", "deal_owner": "Arundhati Sen", "amount_usd": 1545, "close_date": "2026-04-08", "payment_status": "Paid" },
+    { "deal_name": "Ground Score - New Deal - Google WS to Google WS", "deal_owner": "Arundhati Sen", "amount_usd": 3774, "close_date": "2026-04-08", "payment_status": "Paid" },
+    { "deal_name": "Infoblox - Axur New Deal - Gmail → Microsoft 365 (Outlook) migration Google Drive / Shared Drive → OneDrive & SharePoint migration", "deal_owner": "Vivin Joseph (Deactivated User)", "amount_usd": 15276, "close_date": "2026-04-02", "payment_status": "Paid" }
+  ],
+
+  "unpaid_deals_overrides": [],
+
+  "deals_summary": {
+    "total_deals_closed": 16,
+    "deals_payment_received": 16,
+    "deals_payment_not_received": 0,
+    "note": "16 April deals closed for the AM team, all with payment received. Additionally, 3 Q1 FY2026 pending deals (NerdsToGo, Church & Dwight, Artnet — total $28,481) whose payment was received in April are surfaced under manager_incentive.pending_commissions and paid at the Q1 rate (1.5%) = $427.22."
+  },
+
   "commission": {
     "exchange_rate_inr_per_usd": 86,
     "eligibility_min_pct": 60,
