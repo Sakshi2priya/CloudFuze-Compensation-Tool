@@ -643,14 +643,10 @@ def _filter_pinned_for_user(pinned: dict, user: dict | None) -> dict:
             if _rep_name_matches_user(c.get("name") or "", matchers)
         ]
         filtered["commission"] = comm
-    # Manager incentive: keep only if user IS the manager
-    mgr = pinned.get("manager_incentive") or {}
-    mgr_name = mgr.get("manager_name") or ""
-    if mgr_name and _rep_name_matches_user(mgr_name, matchers):
-        filtered["manager_incentive"] = mgr
-    else:
-        # Blank the manager_incentive so managers' payouts don't leak to reps
-        filtered["manager_incentive"] = {}
+    # Manager incentive: ALWAYS preserved intact (Chitradip for SMB, Joy for AM,
+    # Anthony for ENT). Everyone can see the manager's commission calculation —
+    # it's team-level context, not personal data being leaked.
+    filtered["manager_incentive"] = pinned.get("manager_incentive") or {}
     # Recompute deals_summary from filtered deal lists
     _paid_n = len(filtered["paid_deals"])
     _unpaid_n = sum(
@@ -3589,7 +3585,12 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
         return "\n".join(out)
 
     def _smb_chitradip_manager_stepbystep_answer() -> str:
-        """Detailed step-by-step walkthrough of Chitradip's SMB manager commission."""
+        """Detailed step-by-step walkthrough of Chitradip's SMB manager commission.
+
+        Period-agnostic — works for Q1, April, May, or any other pinned SMB period.
+        Handles base commission, pending commissions from prior periods, clawbacks,
+        and the 60% team floor for monthly plans.
+        """
         mgr = pinned.get("manager_incentive") or {}
         team_target = float(mgr.get("team_target_usd") or pinned.get("team_target_usd") or 0)
         team_ach = float(mgr.get("team_achievement_usd") or pinned.get("team_achievement_usd") or 0)
@@ -3598,54 +3599,109 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
         )
         team_paid = float(mgr.get("team_payment_received_usd") or 0)
         rate_pct = float(mgr.get("commission_rate_pct") or 1.5)
-        mgr_q1 = float(mgr.get("manager_q1_amount_usd") or 0) or round(team_paid * rate_pct / 100.0, 2)
-        clawback_total = float(mgr.get("total_clawback_usd") or 0)
-        final = float(mgr.get("final_payout_usd") or (mgr_q1 - clawback_total))
+        mgr_base = float(mgr.get("manager_q1_amount_usd") or 0) or round(team_paid * rate_pct / 100.0, 2)
+        pending_items = mgr.get("pending_commissions") or []
+        pending_total = float(mgr.get("total_pending_commission_usd") or sum(float(p.get("commission_usd") or 0) for p in pending_items))
         clawback_items = mgr.get("clawbacks") or []
-        elig_min = int((pinned.get("commission") or {}).get("eligibility_min_pct") or 50)
+        clawback_total = float(mgr.get("total_clawback_usd") or sum(float(c.get("deduction_usd") or 0) for c in clawback_items))
+        final = float(mgr.get("final_payout_usd")) if mgr.get("final_payout_usd") is not None else (mgr_base + pending_total - clawback_total)
+        # For monthly plans the manager floor is 60% (team_minimum); for quarterly the base rule differs
+        is_monthly = bool(pinned.get("month"))
+        mgr_min = int((pinned.get("monthly_tiers") or {}).get("manager_team_minimum_pct") or mgr.get("manager_team_minimum_pct") or (60 if is_monthly else 0))
+        is_eligible = team_ach_pct >= mgr_min if mgr_min else True
 
+        step = 1
         out = [
             f"## {period_lbl} — Chitradip's SMB Manager Commission, Step by Step",
             "",
-            f"Chitradip is the SMB manager. His Q1 commission is calculated on the team's **Payment Received** at a flat "
-            f"**{rate_pct:g}%** manager rate, then reduced by Q4 clawback adjustments.",
+            f"Chitradip is the SMB manager. His **{period_lbl}** commission is calculated on the team's **Payment Received** at a flat "
+            f"**{rate_pct:g}%** manager rate."
+            + (f" A **{mgr_min}% team-achievement floor** applies for monthly plans." if is_monthly and mgr_min else "")
+            + (" Pending commissions from prior periods and any clawbacks are then applied to reach the final payout." if (pending_items or clawback_items) else ""),
             "",
             "---",
             "",
-            "### Step 1 — Pull the team's Q1 performance",
+            f"### Step {step} — Pull the team's {period_lbl} performance",
             "",
             f"- **Team target**: {_usd(team_target)}",
-            f"- **Team achievement (booked, after Keytel cancellation)**: {_usd(team_ach)} → **{team_ach_pct:.0f}% of quota**",
+            f"- **Team achievement (booked)**: {_usd(team_ach)} → **{team_ach_pct:.1f}% of quota**",
             f"- **Team payment received** (commission base): **{_usd(team_paid)}**",
             "",
             "---",
             "",
-            "### Step 2 — Determine the manager rate",
-            "",
-            f"SMB manager rate: **{rate_pct:g}% of team payment received** (flat — no slab tiers for the manager).",
-            f"Team is at **{team_ach_pct:.0f}%** of quota, which is above the {elig_min}% floor → Chitradip is eligible for the base.",
-            "",
-            "---",
-            "",
-            "### Step 3 — Calculate Q1 base manager commission",
-            "",
-            "```",
-            f"Base = Team Payment Received × {rate_pct:g}%",
-            f"     = {team_paid:,.2f} × {rate_pct:g}%",
-            f"     = {mgr_q1:,.2f}",
-            "```",
-            "",
-            f"**Q1 base commission: {_usd(mgr_q1)}**",
-            "",
-            "---",
-            "",
         ]
-        if clawback_items:
-            out.append("### Step 4 — Apply Q4 clawback adjustments")
+        step += 1
+        # Step: eligibility
+        out.append(f"### Step {step} — Eligibility check")
+        out.append("")
+        if is_monthly and mgr_min:
+            if is_eligible:
+                out.append(
+                    f"Monthly plan applies a **{mgr_min}% team-achievement floor** for the manager base. "
+                    f"Team is at **{team_ach_pct:.1f}%**, which is **≥ {mgr_min}%** → ✅ Chitradip is **eligible** for base commission."
+                )
+            else:
+                out.append(
+                    f"Monthly plan applies a **{mgr_min}% team-achievement floor** for the manager base. "
+                    f"Team is at **{team_ach_pct:.1f}%**, which is **below {mgr_min}%** → ❌ Chitradip earns **$0 base commission** for {period_lbl}. "
+                    "Prior-period pending commissions (if any) are still paid — they aren't subject to the current-period floor."
+                )
+        else:
+            out.append(f"Quarterly plan — Chitradip is eligible for base commission on team payment received at **{rate_pct:g}%**.")
+        out.append("")
+        out.append("---")
+        out.append("")
+        step += 1
+        # Step: base
+        out.append(f"### Step {step} — Calculate {period_lbl} base manager commission")
+        out.append("")
+        out.append("```")
+        if is_monthly and mgr_min and not is_eligible:
+            out.append(f"Base = $0 (team below {mgr_min}% floor)")
+        else:
+            out.append(f"Base = Team Payment Received × {rate_pct:g}%")
+            out.append(f"     = {team_paid:,.2f} × {rate_pct:g}%")
+            out.append(f"     = {mgr_base:,.2f}")
+        out.append("```")
+        out.append("")
+        _effective_base = mgr_base if is_eligible else 0.0
+        out.append(f"**{period_lbl} base commission: {_usd(_effective_base)}**")
+        out.append("")
+        out.append("---")
+        out.append("")
+        step += 1
+        # Step: pending commissions
+        if pending_items:
+            out.append(f"### Step {step} — Add prior-period pending commissions")
             out.append("")
             out.append(
-                "Each clawback is a prior-period adjustment that reduces Chitradip's current quarter commission. "
-                "Reasons vary — deals that were counted but never collected, or slab over-payments that need correction."
+                "Pending commissions are prior-period deals whose payment was received in this cycle. "
+                "They're paid at the ORIGINAL period's rate (Q4 = 1%, Q1 = 1.5%, etc.) — NOT the current rate. "
+                "**They are NOT subject to the current-period team floor.**"
+            )
+            out.append("")
+            out.append("| Deal | Prior period | Deal amount | Rate | Commission |")
+            out.append("| --- | --- | ---: | ---: | ---: |")
+            for p in pending_items:
+                lbl = _esc_md((p.get("deal_name") or "").strip())
+                per = _esc_md((p.get("period") or "").strip())
+                deal_amt = float(p.get("deal_amount_usd") or 0)
+                rate = float(p.get("rate_pct") or 0)
+                comm = float(p.get("commission_usd") or 0)
+                out.append(f"| **{lbl}** | {per} | {_usd(deal_amt)} | {rate:g}% | **+{_usd(comm)}** |")
+            out.append("")
+            out.append(f"**Subtotal pending: +{_usd(pending_total)}**")
+            out.append("")
+            out.append("---")
+            out.append("")
+            step += 1
+        # Step: clawbacks
+        if clawback_items:
+            out.append(f"### Step {step} — Apply prior-period clawback adjustments")
+            out.append("")
+            out.append(
+                "Clawbacks are prior-period corrections that reduce Chitradip's current commission — "
+                "deals that were counted but never collected, or slab over-payments that need correction."
             )
             out.append("")
             out.append("| Clawback | Deal amount | Rate | Deduction |")
@@ -3664,18 +3720,309 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
             out.append("")
             out.append("---")
             out.append("")
-        out.append("### Step 5 — Add it all up")
+            step += 1
+        # Final add-up
+        out.append(f"### Step {step} — Add it all up")
         out.append("")
         out.append("```")
-        out.append(f"Q1 base                {mgr_q1:>12,.2f}")
+        out.append(f"{period_lbl} base            {_effective_base:>12,.2f}")
+        if pending_items:
+            out.append(f"+ Prior-period pending   {pending_total:>12,.2f}")
         if clawback_items:
-            out.append(f"− Q4 clawbacks         {clawback_total:>12,.2f}")
-        out.append(f"───────────────────────────────────")
-        out.append(f"Final Q1 payout        {final:>12,.2f}")
+            out.append(f"− Prior-period clawbacks {clawback_total:>12,.2f}")
+        out.append(f"───────────────────────────────────────────")
+        out.append(f"Final {period_lbl} payout      {final:>12,.2f}")
         out.append("```")
         out.append("")
-        out.append(f"### ✅ Final {period_lbl} payout: **{_usd(final)}** (≈ {_inr(final)})")
+        _inr_txt = f" (≈ {_inr(final)})" if inr_rate else ""
+        icon = "✅" if final > 0 else ("⚠️" if final == 0 else "❌")
+        out.append(f"### {icon} Final {period_lbl} payout: **{_usd(final)}**{_inr_txt}")
         return "\n".join(out)
+
+    def _smb_rep_detail_answer(rep_first_name: str) -> str:
+        """Detailed per-rep SMB commission answer for the current period (Q1/April/May).
+
+        Covers performance vs quota, eligibility check, base commission math,
+        manage-deal incentive (if any), prior-period adjustments (Yogi's Yieldstreet
+        in April, Lawrence's 2 manage deals in Q1, etc.), left_org note, and any
+        total_payout_override_usd from the pinned JSON.
+        """
+        comm_reps = (pinned.get("commission") or {}).get("reps") or []
+        rep_top_list = pinned.get("reps") or []
+        elig_floor = int((pinned.get("commission") or {}).get("eligibility_min_pct") or 50)
+        is_monthly_p = bool(pinned.get("month"))
+
+        rep = next(
+            (r for r in comm_reps if (r.get("name") or "").lower().startswith(rep_first_name.lower())),
+            None,
+        )
+        rep_top = next(
+            (r for r in rep_top_list if (r.get("name") or "").lower().startswith(rep_first_name.lower())),
+            None,
+        )
+        if not rep and not rep_top:
+            return f"No data found for {rep_first_name.title()} in {period_lbl} SMB."
+
+        # Pull figures from whichever source has them (rep_top for monthly, rep for quarterly)
+        rep_name = ((rep or {}).get("name") or (rep_top or {}).get("name") or rep_first_name.title()).strip()
+        quota = float((rep or {}).get("quota_usd") or (rep_top or {}).get("target_usd") or 0)
+        booked = float((rep or {}).get("revenue_achieved_usd") or (rep_top or {}).get("achievement_usd") or 0)
+        paid_recv = float((rep or {}).get("payment_received_usd") or (rep_top or {}).get("payment_received_usd") or 0)
+        ach_pct = (booked / quota * 100.0) if quota else 0.0
+        if rep and rep.get("eligible_pct") is not None:
+            ach_pct = float(rep.get("eligible_pct") or 0)
+        base = float((rep or {}).get("base_commission_usd") or 0)
+        ded_pct = float((rep or {}).get("deduction_pct") or 0)
+        ded_amt = float((rep or {}).get("deduction_usd") or 0)
+        md_total = float((rep or {}).get("manage_deal_usd") or (rep_top or {}).get("manage_deal_usd") or 0)
+        md_paid_now = float((rep or {}).get("manage_deal_paid_now_usd") or (rep_top or {}).get("manage_deal_paid_now_usd") or 0)
+        md_pending = max(md_total - md_paid_now, 0)
+        payout_override = (rep or {}).get("total_payout_override_usd") if rep else (rep_top or {}).get("total_payout_override_usd")
+        payout = float(payout_override) if payout_override is not None else float((rep or {}).get("total_payout_usd") or 0)
+        left_org = bool((rep_top or {}).get("left_org") or (rep or {}).get("left_org"))
+        adjustments = (rep_top or {}).get("adjustments") or (rep or {}).get("adjustments") or []
+        clawback_usd = float((rep_top or {}).get("clawback_usd") or (rep or {}).get("clawback_usd") or 0)
+        clawback_note = ((rep_top or {}).get("clawback_note") or (rep or {}).get("clawback_note") or "").strip()
+        note_v = ((rep_top or {}).get("note") or (rep or {}).get("note") or "").strip()
+        eligible = ach_pct >= elig_floor
+
+        rep_paid_deals = [d for d in paid_deals_block if _rep_name_in_owner((d.get("deal_owner") or ""), rep_first_name)]
+        rep_unpaid_deals = [d for d in unpaid_overrides if _rep_name_in_owner((d.get("deal_owner") or ""), rep_first_name)]
+
+        out = [
+            f"## {rep_name} — {period_lbl} commission breakdown",
+            "",
+            f"This is the full step-by-step calculation for **{rep_name}** in {period_lbl}. All numbers are from the pinned JSON.",
+            "",
+            "---",
+            "",
+            "### Step 1 — Performance vs quota",
+            "",
+            f"- **Individual quota**: {_usd(quota)}",
+            f"- **Revenue achieved (booked)**: {_usd(booked)} → **{ach_pct:.1f}% of quota**",
+            f"- **Payment received**: {_usd(paid_recv)}",
+            "",
+        ]
+        if left_org:
+            out.append(f"_Note: {rep_name} left the organization — his deals still count toward team total, but no personal payout is processed._")
+            out.append("")
+        out.append("---")
+        out.append("")
+        out.append("### Step 2 — Eligibility check")
+        out.append("")
+        _floor_note = ""
+        if is_monthly_p and elig_floor == 60:
+            _floor_note = " The monthly plan applies a **strict 60% floor** — anything below (even 59.9%) earns 0% base commission."
+        if eligible:
+            out.append(
+                f"{rep_name} is at **{ach_pct:.1f}%** of quota → meets the **{elig_floor}% eligibility floor** → ✅ **eligible** for base commission."
+                + _floor_note
+            )
+        else:
+            out.append(
+                f"Achievement is **{ach_pct:.1f}%** — **below the {elig_floor}% eligibility floor** → ❌ **not eligible** for base commission. Base = **$0**."
+                + _floor_note
+            )
+        out.append("")
+        out.append("---")
+        out.append("")
+        # Step: base
+        out.append("### Step 3 — Base commission")
+        out.append("")
+        if eligible:
+            _tier = "monthly slab" if is_monthly_p else "SMB slab"
+            slab_pct = float((rep or {}).get("slab_pct") or 0) or (round(base / paid_recv * 100.0, 2) if paid_recv else 0.0)
+            out.append("```")
+            out.append(f"Base = Payment Received × {_tier} rate")
+            out.append(f"     = {paid_recv:,.2f} × {slab_pct:g}%")
+            out.append(f"     = {base:,.2f}")
+            out.append("```")
+        else:
+            out.append("Not eligible — base = **$0**.")
+        out.append("")
+        if ded_amt > 0:
+            out.append("---")
+            out.append("")
+            out.append(f"### Step 4 — Apply the {int(ded_pct)}% deduction (no manage deal closed)")
+            out.append("")
+            out.append("SMB policy: reps who didn't close a Q1 manage deal incur a **10% deduction** on their achieved commission.")
+            out.append("")
+            out.append("```")
+            out.append(f"Deduction = Base × {int(ded_pct)}%")
+            out.append(f"          = {base:,.2f} × {int(ded_pct)}%")
+            out.append(f"          = {ded_amt:,.2f}")
+            out.append("```")
+            out.append("")
+        if md_total > 0:
+            out.append("---")
+            out.append("")
+            out.append("### Manage deal incentive")
+            out.append("")
+            if md_paid_now > 0 and md_paid_now < md_total:
+                deals_count = int(round(md_total / 500))
+                paid_count = int(round(md_paid_now / 500))
+                out.append(
+                    f"{rep_name} closed **{deals_count} manage deal(s)** at $500 each → **{_usd(md_total)} earned total**."
+                )
+                out.append(
+                    f"At the time {period_lbl} commissions were calculated, payment was received for **{paid_count}** of those deals → **{_usd(md_paid_now)}** paid this cycle."
+                )
+                out.append(f"The remaining **{_usd(md_pending)}** is **pending next cycle**.")
+            else:
+                out.append(f"Manage deal incentive: **{_usd(md_total)}**.")
+            out.append("")
+            out.append("_Manage deal incentive is paid regardless of overall quota achievement — separate from the base-commission eligibility floor._")
+            out.append("")
+        if adjustments:
+            out.append("---")
+            out.append("")
+            out.append("### Prior-period adjustments")
+            out.append("")
+            out.append("| Deal | Prior period | Paid amount | Rate | Commission |")
+            out.append("| --- | --- | ---: | ---: | ---: |")
+            for a in adjustments:
+                dn = _esc_md((a.get("deal_name") or "").strip())
+                per = _esc_md((a.get("period") or "").strip())
+                pa = float(a.get("paid_amount_usd") or a.get("deal_amount_usd") or 0)
+                rate = float(a.get("rate_pct") or 0)
+                comm = float(a.get("commission_usd") or 0)
+                sign = "+" if comm >= 0 else "−"
+                out.append(f"| **{dn}** | {per} | {_usd(pa)} | {rate:g}% | **{sign}{_usd(abs(comm))}** |")
+            out.append("")
+        if clawback_usd > 0:
+            out.append("---")
+            out.append("")
+            out.append(f"### Clawback adjustment: −{_usd(clawback_usd)}")
+            out.append("")
+            if clawback_note:
+                out.append(f"_{_esc_md(clawback_note)}_")
+                out.append("")
+        # Final
+        out.append("---")
+        out.append("")
+        out.append("### Final payout math")
+        out.append("")
+        out.append("```")
+        _base_eff = base if eligible else 0.0
+        out.append(f"Base commission           {_base_eff:>12,.2f}")
+        if ded_amt > 0:
+            out.append(f"− {int(ded_pct)}% deduction            {ded_amt:>12,.2f}")
+        if md_paid_now > 0:
+            out.append(f"+ Manage deal paid now    {md_paid_now:>12,.2f}")
+        if adjustments:
+            adj_sum = sum(float(a.get("commission_usd") or 0) for a in adjustments)
+            _sign = "+" if adj_sum >= 0 else "−"
+            out.append(f"{_sign} Prior-period adjustments {abs(adj_sum):>12,.2f}")
+        if clawback_usd > 0:
+            out.append(f"− Clawback adjustment     {clawback_usd:>12,.2f}")
+        out.append(f"───────────────────────────────────────────")
+        out.append(f"Final {period_lbl} payout       {payout:>12,.2f}")
+        out.append("```")
+        out.append("")
+        icon = "✅" if payout > 0 else ("⚠️" if payout == 0 else "❌")
+        _inr_txt = f" (≈ {_inr(payout)})" if inr_rate else ""
+        out.append(f"### {icon} Final {period_lbl} payout: **{_usd(payout)}**{_inr_txt}")
+        if note_v:
+            out.append("")
+            out.append(f"_{_esc_md(note_v)}_")
+        # Rep's deals for context
+        if rep_paid_deals or rep_unpaid_deals:
+            out.append("")
+            out.append("---")
+            out.append("")
+            out.append(f"### {rep_name}'s {period_lbl} deals")
+            out.append("")
+            out.append("| Deal | Close date | Status | Amount |")
+            out.append("| --- | --- | --- | ---: |")
+            for d in rep_paid_deals + rep_unpaid_deals:
+                dn = _esc_md((d.get("deal_name") or "").strip())
+                cd = _esc_md((d.get("close_date") or "").strip())
+                status = _esc_md((d.get("payment_status") or "").strip())
+                amt = float(d.get("amount_usd") or 0)
+                out.append(f"| **{dn}** | {cd} | {status} | {_usd(amt)} |")
+        return "\n".join(out)
+
+    def _rep_name_in_owner(owner: str, first_name: str) -> bool:
+        low = (owner or "").lower().replace(" (deactivated user)", "").strip()
+        fn = (first_name or "").lower()
+        if not fn:
+            return False
+        return fn in low or low.startswith(fn) or fn == low.split(" ")[0]
+
+    def _smb_eligibility_answer() -> str:
+        """Who is / isn't eligible for SMB commission this period."""
+        comm_reps = (pinned.get("commission") or {}).get("reps") or []
+        rep_top_list = pinned.get("reps") or []
+        elig_floor = int((pinned.get("commission") or {}).get("eligibility_min_pct") or 50)
+        is_monthly_p = bool(pinned.get("month"))
+        out = [
+            f"### {period_lbl} — SMB rep eligibility check",
+            "",
+        ]
+        if is_monthly_p and elig_floor == 60:
+            out.append(
+                f"**Rule:** Monthly plan applies a **strict {elig_floor}% floor** — "
+                f"anything below {elig_floor}% (even 59.9%) earns **0%** base commission."
+            )
+        else:
+            out.append(f"**Rule:** A minimum **{elig_floor}%** of the individual quota is required for base commission.")
+        out.append("")
+        eligible_rows: list[str] = []
+        ineligible_rows: list[str] = []
+        # Prefer rep_top_list (has quota + achievement); fall back to comm_reps.
+        source = rep_top_list if rep_top_list else [
+            {"name": c.get("name"), "target_usd": c.get("quota_usd"), "achievement_usd": c.get("revenue_achieved_usd")}
+            for c in comm_reps
+        ]
+        for r in source:
+            nm = (r.get("name") or "").strip()
+            if not nm:
+                continue
+            tgt = float(r.get("target_usd") or r.get("quota_usd") or 0)
+            ach = float(r.get("achievement_usd") or r.get("revenue_achieved_usd") or 0)
+            pct = (ach / tgt * 100.0) if tgt else 0.0
+            left_org = bool(r.get("left_org"))
+            if left_org:
+                ineligible_rows.append(f"- **{nm}** — Left the organization → **not eligible**")
+            elif pct >= elig_floor:
+                eligible_rows.append(f"- **{nm}** — {pct:.1f}% of {_usd(tgt)} → ✅ **eligible**")
+            else:
+                ineligible_rows.append(f"- **{nm}** — {pct:.1f}% of {_usd(tgt)} → ❌ below {elig_floor}% floor")
+        out.append("**✅ Eligible reps:**")
+        out.append("")
+        out.extend(eligible_rows or ["- (none)"])
+        out.append("")
+        out.append("**❌ Not eligible:**")
+        out.append("")
+        out.extend(ineligible_rows or ["- (none)"])
+        return "\n".join(out)
+
+    def _smb_period_summary_answer() -> str:
+        """3-bullet summary of the SMB period."""
+        mgr = pinned.get("manager_incentive") or {}
+        team_target = float(pinned.get("team_target_usd") or 0)
+        team_ach = float(pinned.get("team_achievement_usd") or 0)
+        team_pct = (team_ach / team_target * 100.0) if team_target else 0.0
+        team_paid = float(mgr.get("team_payment_received_usd") or 0)
+        mgr_final = float(mgr.get("final_payout_usd") or 0)
+        deals_summary = pinned.get("deals_summary") or {}
+        total_deals = int(deals_summary.get("total_deals_closed") or 0)
+        received_deals = int(deals_summary.get("deals_payment_received") or 0)
+        not_received_deals = int(deals_summary.get("deals_payment_not_received") or 0)
+        return "\n".join([
+            f"### {period_lbl} — SMB in 3 bullets",
+            "",
+            f"1. **Team performance**: Booked {_usd(team_ach)} against target {_usd(team_target)} = **{team_pct:.1f}%**. "
+            f"Payment received (commission base): {_usd(team_paid)}. "
+            f"{total_deals} deals closed ({received_deals} paid, {not_received_deals} not paid).",
+            "",
+            f"2. **Chitradip's manager payout**: **{_usd(mgr_final)}**"
+            + (f" ({mgr.get('calculation_note') or ''})" if mgr.get('calculation_note') else "")
+            + ".",
+            "",
+            f"3. **Rep commissions**: See the Commission summary table on this page for each rep's slab, base, adjustments, and final payout. "
+            f"Ask \"Explain [rep name]'s {period_lbl} commission\" for a step-by-step breakdown.",
+        ])
 
     if is_smb_period:
         # SMB-0: Chitradip manager step-by-step
@@ -3689,15 +4036,37 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
             or "synergy employment" in q
             or "ceg solutions" in q
             or "yieldstreet" in q
+            or "willow wealth" in q
+            or "legal soft" in q
             or ("3 clawback" in q or "three clawback" in q)
         ):
             return _smb_chitradip_manager_stepbystep_answer()
+        # SMB-0.5: individual rep detail — routes BEFORE deal-owner breakdown so single-rep
+        # questions get a personal answer rather than the all-reps table.
+        _smb_rep_names_in_q = {
+            n for n in ("vicky", "yogi", "yogesh", "kritika", "lawrence", "larry", "royston", "kartik", "deepak", "rutuja", "lennis")
+            if n in q
+        }
+        # Trigger single-rep answer when exactly ONE rep is mentioned AND question is
+        # about their commission (not just a general "vicky's deals" query).
+        if len(_smb_rep_names_in_q) == 1 and any(
+            t in q for t in (
+                "commission", "payout", "eligibility", "eligible", "explain",
+                "calculation", "why", "how did", "how does", "step by step",
+                "step-by-step", "leave the org", "left the org", "left the organi",
+                "manage deal", "2 manage", "two manage",
+            )
+        ):
+            _first_name = next(iter(_smb_rep_names_in_q))
+            # Map "larry" → "lawrence", "yogesh" → "yogi" for rep lookup
+            _first_name = {"larry": "lawrence", "yogesh": "yogi"}.get(_first_name, _first_name)
+            return _smb_rep_detail_answer(_first_name)
         # SMB-A: deal counts
         if any(
             t in q for t in (
                 "how many deals", "how many deal", "deal count", "deal counts",
                 "number of deals", "number of deal", "total deals closed",
-                "deals closed", "deal closed",
+                "deals closed", "deal closed", "closed and how many",
             )
         ):
             return _smb_deal_counts_answer()
@@ -3708,11 +4077,17 @@ def _answer_pinned_period(pinned: dict, question: str) -> str:
                 "all owners", "every owner", "each owner",
                 "break down deals", "breakdown deals", "deals by",
             )
-        ):
+        ) or len(_smb_rep_names_in_q) > 1:
             return _smb_deal_owner_answer()
-        # SMB-C: Keytel cancellation
-        if any(t in q for t in ("keytel", "keytel systems", "cancellation", "cancelled deal", "cancelled deals", "deal cancelled")):
+        # SMB-C: Keytel cancellation (Q1-only)
+        if any(t in q for t in ("keytel", "keytel systems")):
             return _smb_keytel_cancellation_answer()
+        # SMB-D: eligibility check
+        if any(t in q for t in ("who is eligible", "who's eligible", "not eligible", "eligibility", "60% floor", "eligible for smb", "eligible for commission")):
+            return _smb_eligibility_answer()
+        # SMB-E: 3-bullet summary
+        if any(t in q for t in ("summarize", "summary", "3 bullets", "three bullets", "key insights")):
+            return _smb_period_summary_answer()
 
     # ------------------------------------------------------------------
     # AM-specific intent handlers (Q1 AM page suggested prompts)
@@ -9459,15 +9834,25 @@ def render_admin_dashboard():
                     if nav in ("SMB", "AM"):
                         _picker_prefix = "ga_smb" if nav == "SMB" else "ga_am"
                         _team_prefix = "smb" if nav == "SMB" else "am"
-                        _preset = st.session_state.get(f"{_picker_prefix}_close_date_preset") or "Last quarter"
+                        # The picker is now Custom-only — read the From/To directly from session
+                        # state. Fall back to Last quarter default if the picker hasn't been
+                        # touched yet (first render before the Sales Target tab was opened).
                         _cs = st.session_state.get(f"{_picker_prefix}_close_date_from")
                         _ce = st.session_state.get(f"{_picker_prefix}_close_date_to")
                         _today = datetime.now().date()
-                        _start, _end = _resolve_close_date_range(_preset, today=_today, custom_start=_cs, custom_end=_ce)
+                        if _cs is not None and _ce is not None:
+                            _start, _end = _resolve_close_date_range(
+                                "Custom date range", today=_today, custom_start=_cs, custom_end=_ce
+                            )
+                            _period_lbl = f"{_start:%b %d, %Y} – {_end:%b %d, %Y}"
+                        else:
+                            # No selection yet — default to Last quarter
+                            _start, _end = _resolve_close_date_range("Last quarter", today=_today)
+                            _period_lbl = f"Last quarter ({_start:%b %d, %Y} – {_end:%b %d, %Y})"
                         _month_n = _is_single_month_range(_start, _end)
                         st.caption(
-                            f"Period: **{_preset}** ({_start:%b %d, %Y} – {_end:%b %d, %Y}). "
-                            f"Change the close-date dropdown on the {nav} Sales Target page to switch periods."
+                            f"Period: **{_period_lbl}**. "
+                            f"Change the From/To dates on the {nav} Sales Target page to switch periods."
                         )
 
                         # 1) Single-month range → monthly manager view
@@ -10103,34 +10488,11 @@ def render_upload_section(user_id: int, sales_target_team: str = "SMB"):
                 st.markdown("### Enterprise Sales Target")
                 _render_enterprise_goal_attainment()
 
-            # ---------------------------------------------------------------
-            # Q1 2026 data is LOCKED — the HubSpot import / Excel upload UI is
-            # disabled because Q1 payouts have already been processed and
-            # re-fetching from HubSpot would not reflect the correct cycle
-            # cutoffs (some deals' payments only arrived in later quarters).
-            # All sales-target numbers come from the pinned JSON files in
-            # `policy/*_q1_2026_fixed.json`. To re-enable the import UI for a
-            # future quarter, set the env var `COMP_TOOL_ENABLE_IMPORTS=1`.
-            # ---------------------------------------------------------------
+            # HubSpot import / Excel upload UI is gated behind COMP_TOOL_ENABLE_IMPORTS.
+            # When imports are disabled (default) we skip the entire section silently —
+            # no banner is shown to keep the page clean.
             _imports_enabled = (os.environ.get("COMP_TOOL_ENABLE_IMPORTS") or "").strip() in ("1", "true", "yes")
             if not _imports_enabled:
-                st.divider()
-                st.markdown(
-                    "<div style='margin-top:8px;padding:14px 18px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;'>"
-                    "<div style='font-size:13px;font-weight:700;color:#3730a3;text-transform:uppercase;letter-spacing:0.5px;'>🔒 Q1 2026 data is locked</div>"
-                    f"<div style='font-size:13px;color:#1e3a8a;margin-top:6px;'>"
-                    f"Q1 payouts have already been processed. The {_ctx_label} sales target above is read from the pinned JSON file "
-                    f"(<code>policy/{ctx}_q1_2026_fixed.json</code>). "
-                    "HubSpot fetch and Excel upload are intentionally disabled here because re-fetching wouldn't reflect the correct Q1 payment-received cutoff — "
-                    "some Closed Won deals' payments only arrived in later quarters and are tracked separately as pending."
-                    "</div>"
-                    "<div style='font-size:12px;color:#475569;margin-top:8px;'>"
-                    "To update Q1 numbers, edit the pinned JSON file directly. To re-enable the import UI for a future quarter, set "
-                    "<code>COMP_TOOL_ENABLE_IMPORTS=1</code> in <code>.env</code>."
-                    "</div>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
                 continue
 
             st.divider()
